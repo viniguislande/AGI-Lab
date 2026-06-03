@@ -5,13 +5,31 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Fingerprint 3D</title>
   <style>
-    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
-    body { background: #0f0f12; overflow: hidden; }
-    #app { width: 100vw; height: 100vh; }
-    #stats { position: fixed; bottom: 12px; left: 12px; font: 11px/1.8 monospace; color: rgba(200,210,220,0.6); pointer-events: none; z-index: 10; }
-    #building { position: fixed; inset: 0; background: rgba(8,8,12,0.92); display: none; align-items: center; justify-content: center; flex-direction: column; gap: 18px; font: 600 12px/1 monospace; color: #b8cce8; letter-spacing: 0.22em; z-index: 200; }
-    .bar { width: 160px; height: 1px; background: rgba(255,255,255,0.08); overflow: hidden; }
-    .bar::after { content: ''; display: block; width: 45%; height: 100%; background: linear-gradient(90deg, transparent, #9cf, transparent); animation: sw 1.5s ease-in-out infinite; }
+    *, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+    body { background:#000; overflow:hidden; }
+    #app { width:100vw; height:100vh; position:relative; }
+    /* CSS vignette */
+    #app::after {
+      content:''; position:absolute; inset:0; pointer-events:none; z-index:5;
+      background:radial-gradient(ellipse at 50% 50%, transparent 30%, rgba(0,0,0,0.82) 100%);
+    }
+    #stats {
+      position:fixed; bottom:12px; left:12px;
+      font:11px/1.8 monospace; color:rgba(160,175,195,0.5);
+      pointer-events:none; z-index:10;
+    }
+    #building {
+      position:fixed; inset:0; background:rgba(0,0,0,0.93);
+      display:none; align-items:center; justify-content:center;
+      flex-direction:column; gap:18px;
+      font:600 11px/1 monospace; color:#99aabb; letter-spacing:0.25em; z-index:200;
+    }
+    .bar { width:130px; height:1px; background:rgba(255,255,255,0.06); overflow:hidden; }
+    .bar::after {
+      content:''; display:block; width:45%; height:100%;
+      background:linear-gradient(90deg,transparent,#9cf,transparent);
+      animation:sw 1.5s ease-in-out infinite;
+    }
     @keyframes sw { 0%{transform:translateX(-120%)} 100%{transform:translateX(380%)} }
   </style>
 </head>
@@ -24,149 +42,91 @@
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/FontLoader.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/geometries/TextGeometry.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/CopyShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/BokehShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/EffectComposer.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/RenderPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/ShaderPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/BokehPass.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.7.9/dat.gui.min.js"></script>
 
 <script>
 (function () {
 'use strict';
 
-// ─── Procedural PBR Texture Generator ────────────────────────────────────
-
-function hash(x, y) {
-  const s = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
-  return s - Math.floor(s);
+// ─── Procedural PBR Textures ──────────────────────────────────────────────
+function hash(x, y)  { const s=Math.sin(x*127.1+y*311.7)*43758.5453; return s-Math.floor(s); }
+function vnoise(x,y) {
+  const ix=Math.floor(x),iy=Math.floor(y),fx=x-ix,fy=y-iy;
+  const ux=fx*fx*(3-2*fx),uy=fy*fy*(3-2*fy);
+  const a=hash(ix,iy),b=hash(ix+1,iy),c=hash(ix,iy+1),d=hash(ix+1,iy+1);
+  return a+(b-a)*ux+(c-a)*uy+(a-b-c+d)*ux*uy;
 }
-function vnoise(x, y) {
-  const ix = Math.floor(x), iy = Math.floor(y);
-  const fx = x - ix, fy = y - iy;
-  const ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy);
-  const a = hash(ix, iy), b = hash(ix+1, iy), c = hash(ix, iy+1), d = hash(ix+1, iy+1);
-  return a + (b-a)*ux + (c-a)*uy + (a-b-c+d)*ux*uy;
-}
-function fbm(x, y, oct) {
-  let v = 0, a = 0.5, f = 1;
-  for (let i = 0; i < oct; i++, a *= 0.5, f *= 2) v += vnoise(x*f, y*f) * a;
-  return v;
-}
-function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
-
-function makeTex(w, h, pixFn) {
-  const cv = document.createElement('canvas');
-  cv.width = w; cv.height = h;
-  const ctx = cv.getContext('2d');
-  const img = ctx.createImageData(w, h);
-  for (let y = 0; y < h; y++)
-    for (let x = 0; x < w; x++) {
-      const [r,g,b] = pixFn(x/w, y/h);
-      const i = (y*w+x)*4;
-      img.data[i]=r; img.data[i+1]=g; img.data[i+2]=b; img.data[i+3]=255;
-    }
-  ctx.putImageData(img, 0, 0);
-  const t = new THREE.CanvasTexture(cv);
-  t.wrapS = t.wrapT = THREE.RepeatWrapping;
-  return t;
-}
-
-function normalFromHeight(hFn, w, h, str) {
-  const hm = new Float32Array(w * h);
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) hm[y*w+x] = hFn(x/w, y/h);
-  return makeTex(w, h, (nx, ny) => {
-    const x = Math.round(nx*(w-1)), y = Math.round(ny*(h-1));
-    const xp = Math.min(x+1,w-1), xm = Math.max(x-1,0);
-    const yp = Math.min(y+1,h-1), ym = Math.max(y-1,0);
-    const dx = (hm[y*w+xp] - hm[y*w+xm]) * str;
-    const dy = (hm[yp*w+x] - hm[ym*w+x]) * str;
-    const len = Math.sqrt(dx*dx + dy*dy + 1);
-    return [
-      clamp(Math.round((-dx/len*0.5+0.5)*255), 0, 255),
-      clamp(Math.round((-dy/len*0.5+0.5)*255), 0, 255),
-      clamp(Math.round((1/len*0.5+0.5)*255),   0, 255)
-    ];
-  });
-}
+function fbm(x,y,o){ let v=0,a=0.5,f=1; for(let i=0;i<o;i++,a*=0.5,f*=2) v+=vnoise(x*f,y*f)*a; return v; }
+function clamp(v,lo,hi){ return Math.max(lo,Math.min(hi,v)); }
 
 const S = 256;
-
-// Clay — warm organic
-function clayTex() {
-  const hFn = (nx, ny) => fbm(nx*5, ny*5, 5);
-  const col = makeTex(S, S, (nx, ny) => {
-    const n = fbm(nx*4, ny*4, 4);
-    return [clamp(Math.round(208+n*24-12),0,255), clamp(Math.round(185+n*20-10),0,255), clamp(Math.round(160+n*16-8),0,255)];
+function makeTex(w,h,fn) {
+  const cv=document.createElement('canvas'); cv.width=w; cv.height=h;
+  const ctx=cv.getContext('2d'), img=ctx.createImageData(w,h);
+  for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+    const [r,g,b]=fn(x/w,y/h), i=(y*w+x)*4;
+    img.data[i]=r; img.data[i+1]=g; img.data[i+2]=b; img.data[i+3]=255;
+  }
+  ctx.putImageData(img,0,0);
+  const t=new THREE.CanvasTexture(cv); t.wrapS=t.wrapT=THREE.RepeatWrapping; return t;
+}
+function nrmFromH(hFn,w,h,str) {
+  const hm=new Float32Array(w*h);
+  for(let y=0;y<h;y++) for(let x=0;x<w;x++) hm[y*w+x]=hFn(x/w,y/h);
+  return makeTex(w,h,(nx,ny)=>{
+    const x=Math.round(nx*(w-1)), y=Math.round(ny*(h-1));
+    const dx=(hm[y*w+Math.min(x+1,w-1)]-hm[y*w+Math.max(x-1,0)])*str;
+    const dy=(hm[Math.min(y+1,h-1)*w+x]-hm[Math.max(y-1,0)*w+x])*str;
+    const l=Math.sqrt(dx*dx+dy*dy+1);
+    return [clamp(Math.round((-dx/l*.5+.5)*255),0,255),
+            clamp(Math.round((-dy/l*.5+.5)*255),0,255),
+            clamp(Math.round((1/l*.5+.5)*255),0,255)];
   });
-  const rgh = makeTex(S, S, (nx, ny) => { const v = Math.round((0.55+hFn(nx,ny)*0.4)*255); return [v,v,v]; });
-  return { col, rgh, nrm: normalFromHeight(hFn, S, S, 7) };
 }
 
-// Marble — white with veins
-function marbleTex() {
-  const veinFn = (nx, ny) => {
-    const n = fbm(nx*3, ny*3, 5);
-    return Math.abs(Math.sin((nx*6 + n*10) * Math.PI));
-  };
-  const hFn = (nx, ny) => veinFn(nx, ny) * 0.35;
-  const col = makeTex(S, S, (nx, ny) => {
-    const v = veinFn(nx, ny);
-    const b = Math.round(242 - v*50 + fbm(nx*12,ny*12,2)*8);
-    return [clamp(b+4,0,255), clamp(b,0,255), clamp(b-4,0,255)];
-  });
-  const rgh = makeTex(S, S, (nx, ny) => { const v = Math.round((0.05+veinFn(nx,ny)*0.18)*255); return [v,v,v]; });
-  return { col, rgh, nrm: normalFromHeight(hFn, S, S, 5) };
-}
-
-// Concrete — gray, heavy grain
-function concreteTex() {
-  const hFn = (nx, ny) => fbm(nx*9, ny*9, 6);
-  const col = makeTex(S, S, (nx, ny) => {
-    const n = hFn(nx, ny);
-    const b = Math.round(125 + n*55 - 20);
-    return [clamp(b+3,0,255), clamp(b+1,0,255), clamp(b,0,255)];
-  });
-  const rgh = makeTex(S, S, (nx, ny) => { const v = Math.round((0.45+hFn(nx,ny)*0.55)*255); return [v,v,v]; });
-  return { col, rgh, nrm: normalFromHeight(hFn, S, S, 9) };
-}
-
-// Gold — brushed metal
-function goldTex() {
-  const hFn = (nx, ny) => fbm(nx*22, ny*1.2, 3)*0.6 + fbm(nx*14+3, ny*2+1, 2)*0.4;
-  const col = makeTex(S, S, (nx, ny) => {
-    const n = hFn(nx, ny);
-    return [clamp(Math.round(212+n*28-14),0,255), clamp(Math.round(168+n*22-11),0,255), clamp(Math.round(48+n*18-9),0,255)];
-  });
-  const rgh = makeTex(S, S, (nx, ny) => { const v = Math.round((0.06+hFn(nx,ny)*0.22)*255); return [v,v,v]; });
-  return { col, rgh, nrm: normalFromHeight(hFn, S, S, 3.5) };
-}
-
-// Obsidian — dark volcanic glass
-function obsidianTex() {
-  const hFn = (nx, ny) => Math.abs(Math.sin((ny*7 + fbm(nx*4,ny*4,4)*5)*Math.PI)) * 0.15;
-  const col = makeTex(S, S, (nx, ny) => {
-    const v = hFn(nx, ny) * 90;
-    return [clamp(Math.round(14+v),0,255), clamp(Math.round(12+v),0,255), clamp(Math.round(16+v),0,255)];
-  });
-  const rgh = makeTex(S, S, (nx, ny) => { const v = Math.round((0.02+hFn(nx,ny)/0.15*0.1)*255); return [v,v,v]; });
-  return { col, rgh, nrm: normalFromHeight(hFn, S, S, 4) };
-}
-
-function pbrMat(tex, roughness, metalness, nscale) {
+function pbrMat(col,rgh,nrm,roughness,metalness,nscale,envInt){
   return new THREE.MeshStandardMaterial({
-    map:          tex.col,
-    roughnessMap: tex.rgh,
-    normalMap:    tex.nrm,
-    normalScale:  new THREE.Vector2(nscale, nscale),
-    roughness, metalness,
+    map:col, roughnessMap:rgh, normalMap:nrm,
+    normalScale:new THREE.Vector2(nscale,nscale),
+    roughness, metalness, envMapIntensity:envInt
   });
 }
 
-const TEX = { clay: clayTex(), marble: marbleTex(), concrete: concreteTex(), gold: goldTex(), obsidian: obsidianTex() };
+// Silver — brushed satin, high metalness
+const silverH = (nx,ny)=>fbm(nx*28,ny*1.8,3)*.55+fbm(nx*6,ny*6,2)*.45;
 const MATS = {
-  clay:     pbrMat(TEX.clay,     0.95, 0.00, 1.4),
-  marble:   pbrMat(TEX.marble,   0.12, 0.04, 1.0),
-  concrete: pbrMat(TEX.concrete, 0.88, 0.00, 1.8),
-  gold:     pbrMat(TEX.gold,     0.12, 0.95, 0.8),
-  obsidian: pbrMat(TEX.obsidian, 0.04, 0.92, 1.2),
+  silver: pbrMat(
+    makeTex(S,S,(nx,ny)=>{const n=silverH(nx,ny),v=clamp(Math.round(228+n*16-8),0,255);return[v,v,v+3];}),
+    makeTex(S,S,(nx,ny)=>{const v=Math.round((.12+silverH(nx,ny)*.17)*255);return[v,v,v];}),
+    nrmFromH(silverH,S,S,2.2), 0.18,0.92,0.8,3.0),
+
+  marble: pbrMat(
+    makeTex(S,S,(nx,ny)=>{const v=Math.abs(Math.sin((nx*6+fbm(nx*3,ny*3,5)*10)*Math.PI));const b=Math.round(242-v*50);return[clamp(b+4,0,255),clamp(b,0,255),clamp(b-4,0,255)];}),
+    makeTex(S,S,(nx,ny)=>{const v=Math.round((.04+Math.abs(Math.sin((nx*6+fbm(nx*3,ny*3,5)*10)*Math.PI))*.16)*255);return[v,v,v];}),
+    nrmFromH((nx,ny)=>Math.abs(Math.sin((nx*6+fbm(nx*3,ny*3,5)*10)*Math.PI))*.3,S,S,4.5), 0.10,0.04,0.9,1.2),
+
+  clay: pbrMat(
+    makeTex(S,S,(nx,ny)=>{const n=fbm(nx*4,ny*4,4);return[clamp(Math.round(208+n*24-12),0,255),clamp(Math.round(182+n*20-10),0,255),clamp(Math.round(155+n*16-8),0,255)];}),
+    makeTex(S,S,(nx,ny)=>{const v=Math.round((.55+fbm(nx*5,ny*5,5)*.4)*255);return[v,v,v];}),
+    nrmFromH((nx,ny)=>fbm(nx*5,ny*5,5),S,S,7.0), 0.95,0.00,1.4,0.5),
+
+  concrete: pbrMat(
+    makeTex(S,S,(nx,ny)=>{const n=fbm(nx*9,ny*9,6);const b=Math.round(118+n*55-20);return[clamp(b+3,0,255),clamp(b+1,0,255),clamp(b,0,255)];}),
+    makeTex(S,S,(nx,ny)=>{const v=Math.round((.45+fbm(nx*9,ny*9,6)*.55)*255);return[v,v,v];}),
+    nrmFromH((nx,ny)=>fbm(nx*9,ny*9,6),S,S,9.0), 0.88,0.00,1.8,0.4),
+
+  gold: pbrMat(
+    makeTex(S,S,(nx,ny)=>{const n=fbm(nx*22,ny*1.2,3)*.6+fbm(nx*14+3,ny*2,2)*.4;return[clamp(Math.round(212+n*28-14),0,255),clamp(Math.round(168+n*22-11),0,255),clamp(Math.round(46+n*14-7),0,255)];}),
+    makeTex(S,S,(nx,ny)=>{const v=Math.round((.06+(fbm(nx*22,ny*1.2,3)*.6+fbm(nx*14+3,ny*2,2)*.4)*.22)*255);return[v,v,v];}),
+    nrmFromH((nx,ny)=>fbm(nx*22,ny*1.2,3)*.6+fbm(nx*14+3,ny*2,2)*.4,S,S,3.0), 0.10,0.95,0.7,3.0),
 };
-let activeMat = MATS.clay;
+let activeMat = MATS.silver;
 
 // ─── SVG Fingerprint Paths ────────────────────────────────────────────────
 const SVG_PATHS = [
@@ -197,276 +157,328 @@ const SVG_PATHS = [
 ];
 
 // ─── World mapping ────────────────────────────────────────────────────────
-const SVG_W = 550, SVG_H = 729, WORLD = 5.0;
-const WS = WORLD / Math.max(SVG_W, SVG_H);
-function toWorld(sx, sy) { return [(sx - SVG_W*0.5)*WS, -(sy - SVG_H*0.5)*WS]; }
+const SVG_W=550, SVG_H=729, WORLD=5.0, WS=WORLD/Math.max(SVG_W,SVG_H);
+function toWorld(sx,sy){ return [(sx-SVG_W*.5)*WS, -(sy-SVG_H*.5)*WS]; }
 
 // ─── Renderer ─────────────────────────────────────────────────────────────
-const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-renderer.setSize(innerWidth, innerHeight);
+const renderer = new THREE.WebGLRenderer({ antialias:true, preserveDrawingBuffer:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setSize(innerWidth,innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-try { renderer.outputEncoding = THREE.sRGBEncoding; } catch(e) {}
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.15;
+try { renderer.outputEncoding = THREE.sRGBEncoding; } catch(e){}
 document.getElementById('app').appendChild(renderer.domElement);
 
+// ─── Scene ────────────────────────────────────────────────────────────────
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x0e0e11);
+scene.background = new THREE.Color(0x000000);
 
-const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.01, 100);
-camera.position.set(0, 0, 12);
+// Procedural studio environment map for metallic reflections
+(function buildEnv(){
+  const w=256, h=128, cv=document.createElement('canvas');
+  cv.width=w; cv.height=h;
+  const ctx=cv.getContext('2d');
+  ctx.fillStyle='#030305'; ctx.fillRect(0,0,w,h);
+  // Key light region
+  const g1=ctx.createRadialGradient(w*.18,h*.14,0,w*.18,h*.14,h*.7);
+  g1.addColorStop(0,'rgba(255,253,242,0.92)');
+  g1.addColorStop(.35,'rgba(255,248,228,0.25)');
+  g1.addColorStop(1,'transparent');
+  ctx.fillStyle=g1; ctx.fillRect(0,0,w,h);
+  // Soft fill (right)
+  const g2=ctx.createRadialGradient(w*.82,h*.5,0,w*.82,h*.5,h*.55);
+  g2.addColorStop(0,'rgba(195,215,255,0.12)');
+  g2.addColorStop(1,'transparent');
+  ctx.fillStyle=g2; ctx.fillRect(0,0,w,h);
+  // Subtle floor bounce
+  const g3=ctx.createRadialGradient(w*.5,h*.92,0,w*.5,h*.92,h*.4);
+  g3.addColorStop(0,'rgba(180,200,220,0.08)');
+  g3.addColorStop(1,'transparent');
+  ctx.fillStyle=g3; ctx.fillRect(0,0,w,h);
+
+  const dataTex=new THREE.CanvasTexture(cv);
+  dataTex.mapping=THREE.EquirectangularReflectionMapping;
+  const pmrem=new THREE.PMREMGenerator(renderer);
+  pmrem.compileEquirectangularShader();
+  const env=pmrem.fromEquirectangular(dataTex).texture;
+  scene.environment=env;
+  pmrem.dispose(); dataTex.dispose();
+})();
+
+// ─── Camera ───────────────────────────────────────────────────────────────
+const CAM_END  = new THREE.Vector3(2.2, 2.8, 4.8);
+const CAM_START= CAM_END.clone().multiplyScalar(2.3);
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.01, 100);
+camera.position.copy(CAM_START);
+camera.lookAt(0,0,0);
 
 const controls = new THREE.OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = 0.05;
+controls.target.set(0,0,0);
 controls.enabled = false;
 
-// ─── 3-Point Lighting ─────────────────────────────────────────────────────
-const ambient = new THREE.AmbientLight(0xffffff, 0.18);
+// ─── Post-processing ──────────────────────────────────────────────────────
+const composer = new THREE.EffectComposer(renderer);
+composer.addPass(new THREE.RenderPass(scene, camera));
+
+const bokehPass = new THREE.BokehPass(scene, camera, {
+  focus:    6.4,
+  aperture: 0.00022,
+  maxblur:  0.013,
+  width:    innerWidth,
+  height:   innerHeight
+});
+bokehPass.renderToScreen = true;
+composer.addPass(bokehPass);
+
+// ─── Lighting — dramatic near-single-source ───────────────────────────────
+// Minimal ambient — deep shadows in ridges
+const ambient = new THREE.AmbientLight(0xffffff, 0.06);
 scene.add(ambient);
 
-// Key — upper-left-front, warm, strong
-const keyLight = new THREE.DirectionalLight(0xfff8ee, 2.4);
-keyLight.position.set(-4, 6, 5);
+// Key — hot, upper-left, near-point of hard light
+const keyLight = new THREE.DirectionalLight(0xfff9ee, 4.2);
+keyLight.position.set(-3.5, 6.0, 3.0);
 keyLight.castShadow = true;
-keyLight.shadow.mapSize.set(2048, 2048);
-keyLight.shadow.camera.left = -7; keyLight.shadow.camera.right  =  7;
-keyLight.shadow.camera.top  =  7; keyLight.shadow.camera.bottom = -7;
-keyLight.shadow.camera.near = 1;  keyLight.shadow.camera.far    = 30;
-keyLight.shadow.bias = -0.0005;
+keyLight.shadow.mapSize.set(2048,2048);
+keyLight.shadow.camera.left=-7; keyLight.shadow.camera.right=7;
+keyLight.shadow.camera.top=7;  keyLight.shadow.camera.bottom=-7;
+keyLight.shadow.camera.near=1; keyLight.shadow.camera.far=30;
+keyLight.shadow.bias=-0.0004;
 scene.add(keyLight);
 
-// Fill — right, soft, slightly cool
-const fillLight = new THREE.DirectionalLight(0xddeeff, 0.55);
-fillLight.position.set(6, 1, 3);
-scene.add(fillLight);
-
-// Rim — behind subject, cool edge definition
-const rimLight = new THREE.DirectionalLight(0xeef8ff, 1.0);
-rimLight.position.set(0.5, -2, -7);
+// Rim — cool, behind/below, defines edges against black background
+const rimLight = new THREE.DirectionalLight(0xc8deff, 0.55);
+rimLight.position.set(1.5, -2.5, -7.0);
 scene.add(rimLight);
 
-// ─── Grid ─────────────────────────────────────────────────────────────────
-const grid = new THREE.GridHelper(10, 10, 0x2a2a38, 0x222230);
-grid.position.y = -3.2;
-grid.material.transparent = true;
-grid.material.opacity = 0.15;
+// ─── Fingerprint group — slight diagonal tilt matching reference ──────────
+const fpGroup = new THREE.Group();
+fpGroup.rotation.z = -0.38;   // ~-22° diagonal
+fpGroup.rotation.x = -0.10;   // slight lean toward viewer
+scene.add(fpGroup);
+
+// Subtle grid (hidden by default in dark mode)
+const grid = new THREE.GridHelper(10,10,0x1a1a25,0x111118);
+grid.position.y = -3.5;
+grid.material.transparent=true; grid.material.opacity=0.12;
+grid.visible = false;
 scene.add(grid);
 
-// ─── State & Params ───────────────────────────────────────────────────────
-let font = null, geomCache = {}, meshes = [], instCount = 0, isBuilding = false, buildTimer = null;
+// ─── State ────────────────────────────────────────────────────────────────
+let font=null, geomCache={}, meshes=[], instCount=0, isBuilding=false, buildTimer=null;
 
 const params = {
-  charSize:         0.045,
-  extrudeDepth:     0.15,
-  spacing:          1.1,
+  charSize:         0.019,
+  extrudeDepth:     0.14,
+  spacing:          0.64,
   textContent:      'Identity Biometric Ai Data Neural Network',
-  preset:           'clay',
-  normalScale:      1.3,
+  preset:           'silver',
+  normalScale:      0.8,
   wireframe:        false,
-  keyIntensity:     2.4,
-  fillIntensity:    0.55,
-  rimIntensity:     1.0,
-  ambientIntensity: 0.18,
+  keyIntensity:     4.2,
+  rimIntensity:     0.55,
+  ambientIntensity: 0.06,
+  dofEnabled:       true,
+  dofFocus:         6.4,
+  dofAperture:      2.2,   // ×0.0001
+  dofMaxBlur:       13,    // ×0.001
+  exposure:         1.15,
   autoRotate:       false,
-  autoRotateSpeed:  0.8,
-  showGrid:         true,
-  bgColor:          '#0e0e11',
+  autoRotateSpeed:  0.6,
+  showGrid:         false,
+  bgColor:          '#000000',
   exportPNG() {
-    renderer.render(scene, camera);
-    const a = document.createElement('a');
-    a.href = renderer.domElement.toDataURL('image/png');
-    a.download = 'fingerprint3d.png';
+    composer.render();
+    const a=document.createElement('a');
+    a.href=renderer.domElement.toDataURL('image/png');
+    a.download='fingerprint3d.png';
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
   }
 };
 
 // ─── SVG Sampler ─────────────────────────────────────────────────────────
-const svgEl = document.createElementNS('http://www.w3.org/2000/svg','svg');
-const pathEl = document.createElementNS('http://www.w3.org/2000/svg','path');
-svgEl.style.cssText = 'position:absolute;visibility:hidden;pointer-events:none;top:-9999px;left:-9999px;width:0;height:0;';
-svgEl.appendChild(pathEl);
-document.body.appendChild(svgEl);
+const svgEl=document.createElementNS('http://www.w3.org/2000/svg','svg');
+const pathEl=document.createElementNS('http://www.w3.org/2000/svg','path');
+svgEl.style.cssText='position:absolute;visibility:hidden;pointer-events:none;top:-9999px;left:-9999px;width:0;height:0;';
+svgEl.appendChild(pathEl); document.body.appendChild(svgEl);
 
-function samplePath(d, step) {
-  pathEl.setAttribute('d', d);
-  const len = pathEl.getTotalLength();
-  if (len < 1) return [];
-  const out = [];
-  for (let l = 0; l < len; l += step) {
-    const p0 = pathEl.getPointAtLength(l);
-    const p1 = pathEl.getPointAtLength(Math.min(l + 0.5, len));
-    const ang = Math.atan2(p1.y - p0.y, p1.x - p0.x);
-    const [wx, wy] = toWorld(p0.x, p0.y);
-    out.push(wx, wy, ang);
+function samplePath(d,step){
+  pathEl.setAttribute('d',d);
+  const len=pathEl.getTotalLength(); if(len<1) return [];
+  const out=[];
+  for(let l=0;l<len;l+=step){
+    const p0=pathEl.getPointAtLength(l), p1=pathEl.getPointAtLength(Math.min(l+0.5,len));
+    const ang=Math.atan2(p1.y-p0.y,p1.x-p0.x);
+    const [wx,wy]=toWorld(p0.x,p0.y);
+    out.push(wx,wy,ang);
   }
   return out;
 }
 
-// ─── Geometry Cache ───────────────────────────────────────────────────────
-function clearCache() { for (const g of Object.values(geomCache)) g.dispose(); geomCache = {}; }
+// ─── Geometry cache ───────────────────────────────────────────────────────
+function clearCache(){ for(const g of Object.values(geomCache)) g.dispose(); geomCache={}; }
 
-function getGeom(ch) {
-  if (geomCache[ch]) return geomCache[ch];
-  const g = new THREE.TextGeometry(ch, { font, size: 1.0, height: params.extrudeDepth, curveSegments: 4, bevelEnabled: false });
+function getGeom(ch){
+  if(geomCache[ch]) return geomCache[ch];
+  const g=new THREE.TextGeometry(ch,{font,size:1.0,height:params.extrudeDepth,curveSegments:4,bevelEnabled:false});
   g.computeBoundingBox();
-  const c = new THREE.Vector3(); g.boundingBox.getCenter(c);
-  g.translate(-c.x, -c.y, -c.z);
-  geomCache[ch] = g;
-  return g;
+  const c=new THREE.Vector3(); g.boundingBox.getCenter(c);
+  g.translate(-c.x,-c.y,-c.z);
+  geomCache[ch]=g; return g;
 }
 
 // ─── Build ────────────────────────────────────────────────────────────────
-function disposeInstances() { for (const m of meshes) scene.remove(m); meshes = []; instCount = 0; }
+function disposeInstances(){ for(const m of meshes){ fpGroup.remove(m); } meshes=[]; instCount=0; }
 
-async function build() {
-  if (!font || isBuilding) return;
-  isBuilding = true;
-  document.getElementById('building').style.display = 'flex';
-  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+async function build(){
+  if(!font||isBuilding) return;
+  isBuilding=true;
+  document.getElementById('building').style.display='flex';
+  await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
 
   disposeInstances();
+  const stepSvg=(params.charSize*params.spacing)/WS;
+  const seq=params.textContent.split('').filter(c=>/\S/.test(c));
+  if(!seq.length){ document.getElementById('building').style.display='none'; isBuilding=false; return; }
 
-  const stepSvg = (params.charSize * params.spacing) / WS;
-  const seq = params.textContent.split('').filter(c => /\S/.test(c));
-  if (!seq.length) { document.getElementById('building').style.display = 'none'; isBuilding = false; return; }
+  const flat=[];
+  for(const d of SVG_PATHS){ const p=samplePath(d,stepSvg); for(const v of p) flat.push(v); }
 
-  const flat = [];
-  for (const d of SVG_PATHS) { const p = samplePath(d, stepSvg); for (const v of p) flat.push(v); }
-
-  const nPts = flat.length / 3;
-  const buckets = {};
-  for (let i = 0; i < nPts; i++) {
-    const c = seq[i % seq.length];
-    if (!buckets[c]) buckets[c] = [];
-    buckets[c].push(flat[i*3], flat[i*3+1], flat[i*3+2]);
+  const nPts=flat.length/3, seqLen=seq.length, buckets={};
+  for(let i=0;i<nPts;i++){
+    const c=seq[i%seqLen];
+    if(!buckets[c]) buckets[c]=[];
+    buckets[c].push(flat[i*3],flat[i*3+1],flat[i*3+2]);
     instCount++;
   }
 
-  const dummy = new THREE.Object3D();
-  for (const [ch, pts] of Object.entries(buckets)) {
-    const cnt = pts.length / 3;
-    const mesh = new THREE.InstancedMesh(getGeom(ch), activeMat, cnt);
-    mesh.castShadow = mesh.receiveShadow = true;
-    for (let i = 0; i < cnt; i++) {
-      dummy.position.set(pts[i*3], pts[i*3+1], 0);
-      dummy.rotation.set(0, 0, pts[i*3+2] + Math.PI * 0.5);
+  const dummy=new THREE.Object3D();
+  for(const [ch,pts] of Object.entries(buckets)){
+    const cnt=pts.length/3;
+    const mesh=new THREE.InstancedMesh(getGeom(ch),activeMat,cnt);
+    mesh.castShadow=mesh.receiveShadow=true;
+    for(let i=0;i<cnt;i++){
+      dummy.position.set(pts[i*3],pts[i*3+1],0);
+      dummy.rotation.set(0,0,pts[i*3+2]+Math.PI*.5);
       dummy.scale.setScalar(params.charSize);
       dummy.updateMatrix();
-      mesh.setMatrixAt(i, dummy.matrix);
+      mesh.setMatrixAt(i,dummy.matrix);
     }
-    mesh.instanceMatrix.needsUpdate = true;
-    scene.add(mesh); meshes.push(mesh);
+    mesh.instanceMatrix.needsUpdate=true;
+    fpGroup.add(mesh); meshes.push(mesh);
   }
 
-  document.getElementById('building').style.display = 'none';
-  isBuilding = false;
+  document.getElementById('building').style.display='none';
+  isBuilding=false;
 }
 
-function schedule(clearGeoms) {
+function schedule(clearGeoms){
   clearTimeout(buildTimer);
-  buildTimer = setTimeout(() => { if (clearGeoms) clearCache(); build(); }, 300);
+  buildTimer=setTimeout(()=>{ if(clearGeoms) clearCache(); build(); },300);
 }
 
-// ─── GUI ──────────────────────────────────────────────────────────────────
-let nscaleCtrl;
+// ─── GUI ─────────────────────────────────────────────────────────────────
+function setupGUI(){
+  const gui=new dat.GUI({name:'Fingerprint 3D'}); gui.width=285;
 
-function setupGUI() {
-  const gui = new dat.GUI({ name: 'Fingerprint 3D' });
-  gui.width = 295;
-
-  const typo = gui.addFolder('Typography');
-  typo.add(params, 'charSize',     0.015, 0.12,  0.005).onChange(() => schedule(false));
-  typo.add(params, 'extrudeDepth', 0.02,  0.50,  0.005).onChange(() => schedule(true));
-  typo.add(params, 'spacing',      0.5,   2.5,   0.05 ).onChange(() => schedule(false));
-  typo.add(params, 'textContent').onFinishChange(() => schedule(false));
+  const typo=gui.addFolder('Typography');
+  typo.add(params,'charSize',     0.008,0.08, 0.002).onChange(()=>schedule(false));
+  typo.add(params,'extrudeDepth', 0.02, 0.50, 0.005).onChange(()=>schedule(true));
+  typo.add(params,'spacing',      0.4,  2.0,  0.04 ).onChange(()=>schedule(false));
+  typo.add(params,'textContent').onFinishChange(()=>schedule(false));
   typo.open();
 
-  const matF = gui.addFolder('Material');
-  matF.add(params, 'preset', Object.keys(MATS)).onChange(v => {
-    activeMat = MATS[v];
-    meshes.forEach(m => { m.material = activeMat; });
+  const matF=gui.addFolder('Material');
+  matF.add(params,'preset',Object.keys(MATS)).onChange(v=>{
+    activeMat=MATS[v]; meshes.forEach(m=>{m.material=activeMat;});
   });
-  nscaleCtrl = matF.add(params, 'normalScale', 0.0, 4.0, 0.1).name('normal scale').onChange(v => {
-    Object.values(MATS).forEach(m => m.normalScale.set(v, v));
+  matF.add(params,'normalScale',0,4,0.1).name('normal scale').onChange(v=>{
+    Object.values(MATS).forEach(m=>m.normalScale.set(v,v));
   });
-  matF.add(params, 'wireframe').onChange(v => { activeMat.wireframe = v; });
+  matF.add(params,'wireframe').onChange(v=>{activeMat.wireframe=v;});
   matF.open();
 
-  const litF = gui.addFolder('Lighting');
-  litF.add(params, 'keyIntensity',     0, 5,   0.05).name('key').onChange(v    => { keyLight.intensity  = v; });
-  litF.add(params, 'fillIntensity',    0, 2,   0.05).name('fill').onChange(v   => { fillLight.intensity = v; });
-  litF.add(params, 'rimIntensity',     0, 3,   0.05).name('rim').onChange(v    => { rimLight.intensity  = v; });
-  litF.add(params, 'ambientIntensity', 0, 0.8, 0.01).name('ambient').onChange(v => { ambient.intensity  = v; });
+  const dofF=gui.addFolder('Depth of Field');
+  dofF.add(params,'dofEnabled').name('enabled').onChange(v=>{bokehPass.enabled=v;});
+  dofF.add(params,'dofFocus',  1.0,18.0,0.1 ).name('focus').onChange(v=>{bokehPass.uniforms['focus'].value=v;});
+  dofF.add(params,'dofAperture',0,8,0.1).name('aperture ×10⁻⁴').onChange(v=>{bokehPass.uniforms['aperture'].value=v*0.0001;});
+  dofF.add(params,'dofMaxBlur',0,30,0.5).name('max blur ×10⁻³').onChange(v=>{bokehPass.uniforms['maxblur'].value=v*0.001;});
+  dofF.open();
 
-  const camF = gui.addFolder('Camera');
-  let arCtrl = camF.add(params, 'autoRotate').onChange(v => { controls.autoRotate = v; });
-  camF.add(params, 'autoRotateSpeed', 0.3, 6.0, 0.1).onChange(v => { controls.autoRotateSpeed = v; });
-  camF.add(params, 'showGrid').name('grid').onChange(v => { grid.visible = v; });
-  camF.addColor(params, 'bgColor').name('background').onChange(v => { scene.background.set(v); });
+  const litF=gui.addFolder('Lighting');
+  litF.add(params,'keyIntensity',    0,8,0.1).name('key').onChange(v=>{keyLight.intensity=v;});
+  litF.add(params,'rimIntensity',    0,3,0.05).name('rim').onChange(v=>{rimLight.intensity=v;});
+  litF.add(params,'ambientIntensity',0,0.5,0.01).name('ambient').onChange(v=>{ambient.intensity=v;});
+  litF.add(params,'exposure',        0.5,3,0.05).name('exposure').onChange(v=>{renderer.toneMappingExposure=v;});
 
-  gui.add(params, 'exportPNG').name('⬇ Export PNG');
-
+  const camF=gui.addFolder('Camera');
+  let arCtrl=camF.add(params,'autoRotate').onChange(v=>{controls.autoRotate=v;});
+  camF.add(params,'autoRotateSpeed',0.2,5,0.1).onChange(v=>{controls.autoRotateSpeed=v;});
+  camF.add(params,'showGrid').name('grid').onChange(v=>{grid.visible=v;});
+  camF.addColor(params,'bgColor').name('background').onChange(v=>{scene.background.set(v);});
+  gui.add(params,'exportPNG').name('⬇ Export PNG');
   return arCtrl;
 }
+const arCtrl=setupGUI();
 
-const arCtrl = setupGUI();
-
-// ─── Click to toggle autoRotate ───────────────────────────────────────────
-let mDown = null;
-renderer.domElement.addEventListener('mousedown', e => { mDown = [e.clientX, e.clientY]; });
-renderer.domElement.addEventListener('click', e => {
-  if (!mDown) return;
-  if (Math.hypot(e.clientX - mDown[0], e.clientY - mDown[1]) < 5) {
-    params.autoRotate = !params.autoRotate;
-    controls.autoRotate = params.autoRotate;
-    arCtrl && arCtrl.updateDisplay();
+// ─── Click = toggle autoRotate ────────────────────────────────────────────
+let mDown=null;
+renderer.domElement.addEventListener('mousedown',e=>{mDown=[e.clientX,e.clientY];});
+renderer.domElement.addEventListener('click',e=>{
+  if(!mDown) return;
+  if(Math.hypot(e.clientX-mDown[0],e.clientY-mDown[1])<5){
+    params.autoRotate=!params.autoRotate;
+    controls.autoRotate=params.autoRotate;
+    arCtrl&&arCtrl.updateDisplay();
   }
-  mDown = null;
+  mDown=null;
 });
 
-// ─── Resize ───────────────────────────────────────────────────────────────
-window.addEventListener('resize', () => {
-  camera.aspect = innerWidth / innerHeight;
+window.addEventListener('resize',()=>{
+  camera.aspect=innerWidth/innerHeight;
   camera.updateProjectionMatrix();
-  renderer.setSize(innerWidth, innerHeight);
+  renderer.setSize(innerWidth,innerHeight);
+  composer.setSize(innerWidth,innerHeight);
 });
 
-// ─── Animate ──────────────────────────────────────────────────────────────
-const REVEAL_MS = 1500; let revealT0 = null, revealDone = false;
-let lastFpsT = 0, frames = 0, fps = 0;
-const statsEl = document.getElementById('stats');
+// ─── Animate ─────────────────────────────────────────────────────────────
+const REVEAL_MS=1800; let revealT0=null, revealDone=false;
+let lastFpsT=0, frames=0, fps=0;
+const statsEl=document.getElementById('stats');
 
-function animate(now) {
+function animate(now){
   requestAnimationFrame(animate);
 
-  if (!revealDone) {
-    if (revealT0 === null) revealT0 = now;
-    const t = Math.min((now - revealT0) / REVEAL_MS, 1.0);
-    const e = 1 - Math.pow(1 - t, 3);
-    camera.position.z = 12 + (6 - 12) * e;
-    camera.lookAt(0, 0, 0);
-    if (t >= 1.0) { revealDone = true; controls.enabled = true; }
+  if(!revealDone){
+    if(revealT0===null) revealT0=now;
+    const t=Math.min((now-revealT0)/REVEAL_MS,1.0);
+    const e=1-Math.pow(1-t,3);
+    camera.position.lerpVectors(CAM_START,CAM_END,e);
+    camera.lookAt(0,0,0);
+    if(t>=1.0){ revealDone=true; controls.enabled=true; }
   } else {
     controls.update();
   }
 
-  renderer.render(scene, camera);
-
+  composer.render();
   frames++;
-  if (now - lastFpsT >= 1000) {
-    fps = frames; frames = 0; lastFpsT = now;
-    statsEl.textContent = 'Instances: ' + instCount.toLocaleString() + ' | FPS: ' + fps;
+  if(now-lastFpsT>=1000){
+    fps=frames; frames=0; lastFpsT=now;
+    statsEl.textContent='Instances: '+instCount.toLocaleString()+' | FPS: '+fps;
   }
 }
 requestAnimationFrame(animate);
 
-// ─── Load font ────────────────────────────────────────────────────────────
+// ─── Font load ────────────────────────────────────────────────────────────
 new THREE.FontLoader().load(
   'https://cdn.jsdelivr.net/npm/three@0.128.0/examples/fonts/helvetiker_regular.typeface.json',
-  f => { font = f; build(); },
+  f=>{ font=f; build(); },
   undefined,
-  err => { console.error('Font load error', err); document.getElementById('building').textContent = 'Font load failed'; }
+  err=>{ console.error('Font error',err); document.getElementById('building').textContent='Font load failed'; }
 );
 
 })();
