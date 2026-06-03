@@ -111,10 +111,11 @@ const MATS = {
     makeTex(S,S,(nx,ny)=>{const v=Math.round((.04+Math.abs(Math.sin((nx*6+fbm(nx*3,ny*3,5)*10)*Math.PI))*.16)*255);return[v,v,v];}),
     nrmFromH((nx,ny)=>Math.abs(Math.sin((nx*6+fbm(nx*3,ny*3,5)*10)*Math.PI))*.3,S,S,4.5), 0.10,0.04,0.9,1.2),
 
-  clay: pbrMat(
-    makeTex(S,S,(nx,ny)=>{const n=fbm(nx*4,ny*4,4);return[clamp(Math.round(208+n*24-12),0,255),clamp(Math.round(182+n*20-10),0,255),clamp(Math.round(155+n*16-8),0,255)];}),
+  clay: Object.assign(pbrMat(
+    makeTex(S,S,(nx,ny)=>{const n=fbm(nx*4,ny*4,4);return[clamp(Math.round(210+n*24-12),0,255),clamp(Math.round(155+n*18-9),0,255),clamp(Math.round(130+n*14-7),0,255)];}),
     makeTex(S,S,(nx,ny)=>{const v=Math.round((.55+fbm(nx*5,ny*5,5)*.4)*255);return[v,v,v];}),
     nrmFromH((nx,ny)=>fbm(nx*5,ny*5,5),S,S,7.0), 0.95,0.00,1.4,0.5),
+    {emissive:new THREE.Color(0x3a0808),emissiveIntensity:0.22}),
 
   concrete: pbrMat(
     makeTex(S,S,(nx,ny)=>{const n=fbm(nx*9,ny*9,6);const b=Math.round(118+n*55-20);return[clamp(b+3,0,255),clamp(b+1,0,255),clamp(b,0,255)];}),
@@ -161,7 +162,7 @@ const SVG_W=550, SVG_H=729, WORLD=5.0, WS=WORLD/Math.max(SVG_W,SVG_H);
 function toWorld(sx,sy){ return [(sx-SVG_W*.5)*WS, -(sy-SVG_H*.5)*WS]; }
 
 // ─── Renderer ─────────────────────────────────────────────────────────────
-const renderer = new THREE.WebGLRenderer({ antialias:true, preserveDrawingBuffer:true });
+const renderer = new THREE.WebGLRenderer({ antialias:true, preserveDrawingBuffer:true, alpha:true });
 renderer.setPixelRatio(Math.min(devicePixelRatio,2));
 renderer.setSize(innerWidth,innerHeight);
 renderer.shadowMap.enabled = true;
@@ -273,7 +274,9 @@ let font=null, geomCache={}, meshes=[], instCount=0, isBuilding=false, buildTime
 
 const params = {
   charSize:         0.019,
-  extrudeDepth:     0.14,
+  extrudeDepth:     2.0,
+  layers:           1,
+  layerGap:         1.2,
   spacing:          0.64,
   textContent:      'Identity Biometric Ai Data Neural Network',
   preset:           'silver',
@@ -297,6 +300,21 @@ const params = {
     a.href=renderer.domElement.toDataURL('image/png');
     a.download='fingerprint3d.png';
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  },
+  exportTransparent() {
+    const prevBg=scene.background;
+    const prevWf=activeMat.wireframe;
+    scene.background=null;
+    activeMat.wireframe=false;
+    renderer.setClearColor(0x000000,0);
+    renderer.render(scene,camera);
+    const a=document.createElement('a');
+    a.href=renderer.domElement.toDataURL('image/png');
+    a.download='fingerprint3d_transparent.png';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    scene.background=prevBg;
+    activeMat.wireframe=prevWf;
+    renderer.setClearColor(0x000000,1);
   }
 };
 
@@ -348,12 +366,20 @@ async function build(){
   const flat=[];
   for(const d of SVG_PATHS){ const p=samplePath(d,stepSvg); for(const v of p) flat.push(v); }
 
+  const nLayers=Math.max(1,Math.round(params.layers));
   const nPts=flat.length/3, seqLen=seq.length, buckets={};
   for(let i=0;i<nPts;i++){
-    const c=seq[i%seqLen];
-    if(!buckets[c]) buckets[c]=[];
-    buckets[c].push(flat[i*3],flat[i*3+1],flat[i*3+2]);
-    instCount++;
+    const ang=flat[i*3+2];
+    const perpX=-Math.sin(ang), perpY=Math.cos(ang);
+    const layerSpacing=params.charSize*params.layerGap;
+    for(let L=0;L<nLayers;L++){
+      const offset=(L-(nLayers-1)*0.5)*layerSpacing;
+      const wx=flat[i*3]+perpX*offset, wy=flat[i*3+1]+perpY*offset;
+      const c=seq[(i*nLayers+L)%seqLen];
+      if(!buckets[c]) buckets[c]=[];
+      buckets[c].push(wx,wy,ang);
+      instCount++;
+    }
   }
 
   const dummy=new THREE.Object3D();
@@ -363,7 +389,9 @@ async function build(){
     mesh.castShadow=mesh.receiveShadow=true;
     for(let i=0;i<cnt;i++){
       dummy.position.set(pts[i*3],pts[i*3+1],0);
-      dummy.rotation.set(0,0,pts[i*3+2]+Math.PI*.5);
+      let rot=pts[i*3+2]+Math.PI*0.5;
+      if(Math.cos(rot)<0) rot-=Math.PI;
+      dummy.rotation.set(0,0,rot);
       dummy.scale.setScalar(params.charSize);
       dummy.updateMatrix();
       mesh.setMatrixAt(i,dummy.matrix);
@@ -387,7 +415,9 @@ function setupGUI(){
 
   const typo=gui.addFolder('Typography');
   typo.add(params,'charSize',     0.008,0.08, 0.002).onChange(()=>schedule(false));
-  typo.add(params,'extrudeDepth', 0.02, 0.50, 0.005).onChange(()=>schedule(true));
+  typo.add(params,'extrudeDepth', 0.1,  12.0, 0.1  ).onChange(()=>schedule(true));
+  typo.add(params,'layers',       1,    3,    1    ).name('layers (rows)').step(1).onChange(()=>schedule(false));
+  typo.add(params,'layerGap',     0.5,  3.0,  0.05 ).name('row gap').onChange(()=>schedule(false));
   typo.add(params,'spacing',      0.4,  2.0,  0.04 ).onChange(()=>schedule(false));
   typo.add(params,'textContent').onFinishChange(()=>schedule(false));
   typo.open();
@@ -421,6 +451,7 @@ function setupGUI(){
   camF.add(params,'showGrid').name('grid').onChange(v=>{grid.visible=v;});
   camF.addColor(params,'bgColor').name('background').onChange(v=>{scene.background.set(v);});
   gui.add(params,'exportPNG').name('⬇ Export PNG');
+  gui.add(params,'exportTransparent').name('⬇ Export PNG (transparent)');
   return arCtrl;
 }
 const arCtrl=setupGUI();
