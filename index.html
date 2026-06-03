@@ -7,46 +7,18 @@
   <style>
     *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #0f0f12; overflow: hidden; }
-    #app { width: 100vw; height: 100vh; display: block; }
-    #stats {
-      position: fixed; bottom: 12px; left: 12px;
-      font: 11px/1.8 monospace; color: rgba(200,210,220,0.7);
-      pointer-events: none; z-index: 10;
-      text-shadow: 0 1px 4px rgba(0,0,0,0.8);
-    }
-    #building {
-      position: fixed; inset: 0;
-      background: rgba(10,10,14,0.88);
-      display: none;
-      align-items: center; justify-content: center;
-      flex-direction: column; gap: 14px;
-      font: 700 14px/1 monospace; color: #e0e8ff;
-      letter-spacing: 0.2em; z-index: 200;
-    }
-    #building-bar {
-      width: 200px; height: 2px;
-      background: rgba(255,255,255,0.15);
-      position: relative; overflow: hidden;
-      border-radius: 2px;
-    }
-    #building-bar::after {
-      content: '';
-      position: absolute; top: 0; left: -60%;
-      width: 60%; height: 100%;
-      background: linear-gradient(90deg, transparent, #7df, transparent);
-      animation: slide 1.2s linear infinite;
-    }
-    @keyframes slide { to { left: 160%; } }
+    #app { width: 100vw; height: 100vh; }
+    #stats { position: fixed; bottom: 12px; left: 12px; font: 11px/1.8 monospace; color: rgba(200,210,220,0.6); pointer-events: none; z-index: 10; }
+    #building { position: fixed; inset: 0; background: rgba(8,8,12,0.92); display: none; align-items: center; justify-content: center; flex-direction: column; gap: 18px; font: 600 12px/1 monospace; color: #b8cce8; letter-spacing: 0.22em; z-index: 200; }
+    .bar { width: 160px; height: 1px; background: rgba(255,255,255,0.08); overflow: hidden; }
+    .bar::after { content: ''; display: block; width: 45%; height: 100%; background: linear-gradient(90deg, transparent, #9cf, transparent); animation: sw 1.5s ease-in-out infinite; }
+    @keyframes sw { 0%{transform:translateX(-120%)} 100%{transform:translateX(380%)} }
   </style>
 </head>
 <body>
-
 <div id="app"></div>
-<div id="stats">Instances: — | FPS: —</div>
-<div id="building">
-  BUILDING…
-  <div id="building-bar"></div>
-</div>
+<div id="stats">…</div>
+<div id="building">BUILDING <div class="bar"></div></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
@@ -58,7 +30,145 @@
 (function () {
 'use strict';
 
-// ─── SVG Fingerprint Ridge Paths ──────────────────────────────────────────
+// ─── Procedural PBR Texture Generator ────────────────────────────────────
+
+function hash(x, y) {
+  const s = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+  return s - Math.floor(s);
+}
+function vnoise(x, y) {
+  const ix = Math.floor(x), iy = Math.floor(y);
+  const fx = x - ix, fy = y - iy;
+  const ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy);
+  const a = hash(ix, iy), b = hash(ix+1, iy), c = hash(ix, iy+1), d = hash(ix+1, iy+1);
+  return a + (b-a)*ux + (c-a)*uy + (a-b-c+d)*ux*uy;
+}
+function fbm(x, y, oct) {
+  let v = 0, a = 0.5, f = 1;
+  for (let i = 0; i < oct; i++, a *= 0.5, f *= 2) v += vnoise(x*f, y*f) * a;
+  return v;
+}
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+function makeTex(w, h, pixFn) {
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  const ctx = cv.getContext('2d');
+  const img = ctx.createImageData(w, h);
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++) {
+      const [r,g,b] = pixFn(x/w, y/h);
+      const i = (y*w+x)*4;
+      img.data[i]=r; img.data[i+1]=g; img.data[i+2]=b; img.data[i+3]=255;
+    }
+  ctx.putImageData(img, 0, 0);
+  const t = new THREE.CanvasTexture(cv);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  return t;
+}
+
+function normalFromHeight(hFn, w, h, str) {
+  const hm = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) hm[y*w+x] = hFn(x/w, y/h);
+  return makeTex(w, h, (nx, ny) => {
+    const x = Math.round(nx*(w-1)), y = Math.round(ny*(h-1));
+    const xp = Math.min(x+1,w-1), xm = Math.max(x-1,0);
+    const yp = Math.min(y+1,h-1), ym = Math.max(y-1,0);
+    const dx = (hm[y*w+xp] - hm[y*w+xm]) * str;
+    const dy = (hm[yp*w+x] - hm[ym*w+x]) * str;
+    const len = Math.sqrt(dx*dx + dy*dy + 1);
+    return [
+      clamp(Math.round((-dx/len*0.5+0.5)*255), 0, 255),
+      clamp(Math.round((-dy/len*0.5+0.5)*255), 0, 255),
+      clamp(Math.round((1/len*0.5+0.5)*255),   0, 255)
+    ];
+  });
+}
+
+const S = 256;
+
+// Clay — warm organic
+function clayTex() {
+  const hFn = (nx, ny) => fbm(nx*5, ny*5, 5);
+  const col = makeTex(S, S, (nx, ny) => {
+    const n = fbm(nx*4, ny*4, 4);
+    return [clamp(Math.round(208+n*24-12),0,255), clamp(Math.round(185+n*20-10),0,255), clamp(Math.round(160+n*16-8),0,255)];
+  });
+  const rgh = makeTex(S, S, (nx, ny) => { const v = Math.round((0.55+hFn(nx,ny)*0.4)*255); return [v,v,v]; });
+  return { col, rgh, nrm: normalFromHeight(hFn, S, S, 7) };
+}
+
+// Marble — white with veins
+function marbleTex() {
+  const veinFn = (nx, ny) => {
+    const n = fbm(nx*3, ny*3, 5);
+    return Math.abs(Math.sin((nx*6 + n*10) * Math.PI));
+  };
+  const hFn = (nx, ny) => veinFn(nx, ny) * 0.35;
+  const col = makeTex(S, S, (nx, ny) => {
+    const v = veinFn(nx, ny);
+    const b = Math.round(242 - v*50 + fbm(nx*12,ny*12,2)*8);
+    return [clamp(b+4,0,255), clamp(b,0,255), clamp(b-4,0,255)];
+  });
+  const rgh = makeTex(S, S, (nx, ny) => { const v = Math.round((0.05+veinFn(nx,ny)*0.18)*255); return [v,v,v]; });
+  return { col, rgh, nrm: normalFromHeight(hFn, S, S, 5) };
+}
+
+// Concrete — gray, heavy grain
+function concreteTex() {
+  const hFn = (nx, ny) => fbm(nx*9, ny*9, 6);
+  const col = makeTex(S, S, (nx, ny) => {
+    const n = hFn(nx, ny);
+    const b = Math.round(125 + n*55 - 20);
+    return [clamp(b+3,0,255), clamp(b+1,0,255), clamp(b,0,255)];
+  });
+  const rgh = makeTex(S, S, (nx, ny) => { const v = Math.round((0.45+hFn(nx,ny)*0.55)*255); return [v,v,v]; });
+  return { col, rgh, nrm: normalFromHeight(hFn, S, S, 9) };
+}
+
+// Gold — brushed metal
+function goldTex() {
+  const hFn = (nx, ny) => fbm(nx*22, ny*1.2, 3)*0.6 + fbm(nx*14+3, ny*2+1, 2)*0.4;
+  const col = makeTex(S, S, (nx, ny) => {
+    const n = hFn(nx, ny);
+    return [clamp(Math.round(212+n*28-14),0,255), clamp(Math.round(168+n*22-11),0,255), clamp(Math.round(48+n*18-9),0,255)];
+  });
+  const rgh = makeTex(S, S, (nx, ny) => { const v = Math.round((0.06+hFn(nx,ny)*0.22)*255); return [v,v,v]; });
+  return { col, rgh, nrm: normalFromHeight(hFn, S, S, 3.5) };
+}
+
+// Obsidian — dark volcanic glass
+function obsidianTex() {
+  const hFn = (nx, ny) => Math.abs(Math.sin((ny*7 + fbm(nx*4,ny*4,4)*5)*Math.PI)) * 0.15;
+  const col = makeTex(S, S, (nx, ny) => {
+    const v = hFn(nx, ny) * 90;
+    return [clamp(Math.round(14+v),0,255), clamp(Math.round(12+v),0,255), clamp(Math.round(16+v),0,255)];
+  });
+  const rgh = makeTex(S, S, (nx, ny) => { const v = Math.round((0.02+hFn(nx,ny)/0.15*0.1)*255); return [v,v,v]; });
+  return { col, rgh, nrm: normalFromHeight(hFn, S, S, 4) };
+}
+
+function pbrMat(tex, roughness, metalness, nscale) {
+  return new THREE.MeshStandardMaterial({
+    map:          tex.col,
+    roughnessMap: tex.rgh,
+    normalMap:    tex.nrm,
+    normalScale:  new THREE.Vector2(nscale, nscale),
+    roughness, metalness,
+  });
+}
+
+const TEX = { clay: clayTex(), marble: marbleTex(), concrete: concreteTex(), gold: goldTex(), obsidian: obsidianTex() };
+const MATS = {
+  clay:     pbrMat(TEX.clay,     0.95, 0.00, 1.4),
+  marble:   pbrMat(TEX.marble,   0.12, 0.04, 1.0),
+  concrete: pbrMat(TEX.concrete, 0.88, 0.00, 1.8),
+  gold:     pbrMat(TEX.gold,     0.12, 0.95, 0.8),
+  obsidian: pbrMat(TEX.obsidian, 0.04, 0.92, 1.2),
+};
+let activeMat = MATS.clay;
+
+// ─── SVG Fingerprint Paths ────────────────────────────────────────────────
 const SVG_PATHS = [
   "M276.345 241.707C302.015 238.906 333.72 248.242 355.44 261.592C427.425 305.837 455.535 391.51 454.63 472.25C453.745 550.905 430.975 623.48 390.13 690.46C388.145 693.72 385.155 699.22 380.99 700.16C375.045 700.92 371.46 696.015 373.885 690.595C377.46 682.605 382.67 675.215 387.035 667.575C393.085 656.765 398.725 645.725 403.94 634.485C452.455 528.8 463.805 380.085 373.655 292.556C363.345 283.508 354.13 276.658 341.99 270.134C316.575 256.473 286.06 250.671 257.973 258.914C198.075 276.495 200.213 342.624 189.758 392.535C184.568 419.15 177.177 444.25 164.329 468.3C138.437 516.815 90.8395 546.8 39.8395 563.635C34.661 565.345 28.051 565.505 27.41 558.335C26.864 552.23 34.2445 550.62 38.93 549.04C78.912 535.56 116.551 513.455 141.348 478.57C165.821 444.135 174.5 403.915 180.897 362.9C185.721 331.972 190.218 298.59 210.778 273.542C227.557 253.101 250.548 243.974 276.345 241.707Z",
   "M285.37 324.712C286.37 324.626 287.33 324.579 288.335 324.617C306.835 325.324 322.2 334.506 334.47 347.978C365.02 381.515 375.175 433.45 372.965 477.55C368.76 561.55 324.7 633.65 263.32 689.03C255.897 695.725 218.002 728.59 210.409 727.13C208.396 726.74 205.589 724.765 204.828 722.795C203.858 720.285 205.458 717.55 207.07 715.72C211.536 710.66 218.957 706.955 224.453 702.905C232.281 697.04 239.917 690.925 247.349 684.565C285.28 651.815 316.08 614.125 336.965 568.235C358.38 521.175 365.705 467.355 353.615 416.7C351.685 408.61 349.07 401.6 346.185 393.875C335.735 367.975 310.39 329.454 276.235 340.522C251.254 348.618 245.719 381.395 242.451 403.855C237.997 434.455 229.678 465.78 216.086 493.77C186.406 556.03 129.297 598.8 65.6305 622.205C60.091 624.24 54.1075 624.5 53.022 617.32C52.0955 611.185 59.7405 609.53 64.0075 607.74C103.961 592.74 141.108 569.575 169.84 537.775C195.76 509.03 212.213 474.54 221.635 437.165C223.981 427.59 226.015 417.94 227.732 408.235C230.67 390.63 232.013 374.005 239.992 357.605C249.427 338.217 263.64 326.612 285.37 324.712Z",
@@ -86,19 +196,12 @@ const SVG_PATHS = [
   "M196.211 686.5C206.723 686.27 206.774 696.88 197.191 702.41C187.923 707.755 178.889 715.24 168.889 719.8C160.164 719.91 158.505 710.58 163.132 707.83C173.062 701.925 186.352 691.49 196.211 686.5Z"
 ];
 
-// ─── World-space mapping ──────────────────────────────────────────────────
-const SVG_W = 550, SVG_H = 729;
-const WORLD = 5.0;
+// ─── World mapping ────────────────────────────────────────────────────────
+const SVG_W = 550, SVG_H = 729, WORLD = 5.0;
 const WS = WORLD / Math.max(SVG_W, SVG_H);
+function toWorld(sx, sy) { return [(sx - SVG_W*0.5)*WS, -(sy - SVG_H*0.5)*WS]; }
 
-function toWorld(sx, sy) {
-  return [
-    (sx - SVG_W * 0.5) * WS,
-    -(sy - SVG_H * 0.5) * WS
-  ];
-}
-
-// ─── Renderer + Scene ────────────────────────────────────────────────────
+// ─── Renderer ─────────────────────────────────────────────────────────────
 const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
@@ -108,78 +211,89 @@ try { renderer.outputEncoding = THREE.sRGBEncoding; } catch(e) {}
 document.getElementById('app').appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x0f0f12);
+scene.background = new THREE.Color(0x0e0e11);
 
-const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.01, 100);
+const camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.01, 100);
 camera.position.set(0, 0, 12);
 
 const controls = new THREE.OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = 0.05;
-controls.enabled = false; // enabled after camera reveal
+controls.enabled = false;
 
-// ─── Lights ──────────────────────────────────────────────────────────────
-const ambientLight = new THREE.AmbientLight(0xffffff, 0.3);
-scene.add(ambientLight);
+// ─── 3-Point Lighting ─────────────────────────────────────────────────────
+const ambient = new THREE.AmbientLight(0xffffff, 0.18);
+scene.add(ambient);
 
-const keyLight = new THREE.DirectionalLight(0xffffff, 1.4);
-keyLight.position.set(-3, 4, 5);
+// Key — upper-left-front, warm, strong
+const keyLight = new THREE.DirectionalLight(0xfff8ee, 2.4);
+keyLight.position.set(-4, 6, 5);
 keyLight.castShadow = true;
-keyLight.shadow.mapSize.set(1024, 1024);
-keyLight.shadow.camera.left   = -6;
-keyLight.shadow.camera.right  =  6;
-keyLight.shadow.camera.top    =  6;
-keyLight.shadow.camera.bottom = -6;
-keyLight.shadow.camera.near   =  1;
-keyLight.shadow.camera.far    = 30;
+keyLight.shadow.mapSize.set(2048, 2048);
+keyLight.shadow.camera.left = -7; keyLight.shadow.camera.right  =  7;
+keyLight.shadow.camera.top  =  7; keyLight.shadow.camera.bottom = -7;
+keyLight.shadow.camera.near = 1;  keyLight.shadow.camera.far    = 30;
+keyLight.shadow.bias = -0.0005;
 scene.add(keyLight);
 
-const fillLight = new THREE.DirectionalLight(0xaabbcc, 0.4);
-fillLight.position.set(4, -2, 2);
+// Fill — right, soft, slightly cool
+const fillLight = new THREE.DirectionalLight(0xddeeff, 0.55);
+fillLight.position.set(6, 1, 3);
 scene.add(fillLight);
 
-const rimLight = new THREE.PointLight(0xffeedd, 0.6);
-rimLight.position.set(0, -3, -4);
+// Rim — behind subject, cool edge definition
+const rimLight = new THREE.DirectionalLight(0xeef8ff, 1.0);
+rimLight.position.set(0.5, -2, -7);
 scene.add(rimLight);
 
-// ─── Grid ────────────────────────────────────────────────────────────────
-const grid = new THREE.GridHelper(10, 10, 0x3a3a50, 0x2a2a3a);
-grid.position.y = -3;
+// ─── Grid ─────────────────────────────────────────────────────────────────
+const grid = new THREE.GridHelper(10, 10, 0x2a2a38, 0x222230);
+grid.position.y = -3.2;
 grid.material.transparent = true;
 grid.material.opacity = 0.15;
 scene.add(grid);
 
-// ─── Materials ───────────────────────────────────────────────────────────
-const MATS = {
-  marble:   new THREE.MeshStandardMaterial({ color: 0xd8dce2, roughness: 0.55, metalness: 0.05 }),
-  darkHolo: new THREE.MeshStandardMaterial({ color: 0x00e5ff, roughness: 0.20, metalness: 0.80, emissive: new THREE.Color(0x003344), emissiveIntensity: 0.4 }),
-  gold:     new THREE.MeshStandardMaterial({ color: 0xd4a017, roughness: 0.30, metalness: 0.95 }),
-  obsidian: new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.10, metalness: 0.90 }),
-  clay:     new THREE.MeshStandardMaterial({ color: 0xe8d5c0, roughness: 0.90, metalness: 0.00 }),
+// ─── State & Params ───────────────────────────────────────────────────────
+let font = null, geomCache = {}, meshes = [], instCount = 0, isBuilding = false, buildTimer = null;
+
+const params = {
+  charSize:         0.045,
+  extrudeDepth:     0.15,
+  spacing:          1.1,
+  textContent:      'Identity Biometric Ai Data Neural Network',
+  preset:           'clay',
+  normalScale:      1.3,
+  wireframe:        false,
+  keyIntensity:     2.4,
+  fillIntensity:    0.55,
+  rimIntensity:     1.0,
+  ambientIntensity: 0.18,
+  autoRotate:       false,
+  autoRotateSpeed:  0.8,
+  showGrid:         true,
+  bgColor:          '#0e0e11',
+  exportPNG() {
+    renderer.render(scene, camera);
+    const a = document.createElement('a');
+    a.href = renderer.domElement.toDataURL('image/png');
+    a.download = 'fingerprint3d.png';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  }
 };
-let activeMat = MATS.marble;
 
-// ─── State ───────────────────────────────────────────────────────────────
-let font       = null;
-let geomCache  = {};
-let meshes     = [];
-let instCount  = 0;
-let isBuilding = false;
-let buildTimer = null;
-
-// ─── Hidden SVG sampler ──────────────────────────────────────────────────
-const svgEl  = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-const pathEl = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+// ─── SVG Sampler ─────────────────────────────────────────────────────────
+const svgEl = document.createElementNS('http://www.w3.org/2000/svg','svg');
+const pathEl = document.createElementNS('http://www.w3.org/2000/svg','path');
 svgEl.style.cssText = 'position:absolute;visibility:hidden;pointer-events:none;top:-9999px;left:-9999px;width:0;height:0;';
 svgEl.appendChild(pathEl);
 document.body.appendChild(svgEl);
 
-function samplePath(d, stepSvg) {
+function samplePath(d, step) {
   pathEl.setAttribute('d', d);
   const len = pathEl.getTotalLength();
   if (len < 1) return [];
   const out = [];
-  for (let l = 0; l < len; l += stepSvg) {
+  for (let l = 0; l < len; l += step) {
     const p0 = pathEl.getPointAtLength(l);
     const p1 = pathEl.getPointAtLength(Math.min(l + 0.5, len));
     const ang = Math.atan2(p1.y - p0.y, p1.x - p0.x);
@@ -189,281 +303,170 @@ function samplePath(d, stepSvg) {
   return out;
 }
 
-// ─── Geometry cache ──────────────────────────────────────────────────────
-function clearCache() {
-  for (const g of Object.values(geomCache)) g.dispose();
-  geomCache = {};
-}
+// ─── Geometry Cache ───────────────────────────────────────────────────────
+function clearCache() { for (const g of Object.values(geomCache)) g.dispose(); geomCache = {}; }
 
-function getGeom(char) {
-  if (geomCache[char]) return geomCache[char];
-  const g = new THREE.TextGeometry(char, {
-    font,
-    size:         1.0,
-    height:       params.extrudeDepth,
-    curveSegments: 3,
-    bevelEnabled: false,
-  });
+function getGeom(ch) {
+  if (geomCache[ch]) return geomCache[ch];
+  const g = new THREE.TextGeometry(ch, { font, size: 1.0, height: params.extrudeDepth, curveSegments: 4, bevelEnabled: false });
   g.computeBoundingBox();
-  const c = new THREE.Vector3();
-  g.boundingBox.getCenter(c);
+  const c = new THREE.Vector3(); g.boundingBox.getCenter(c);
   g.translate(-c.x, -c.y, -c.z);
-  geomCache[char] = g;
+  geomCache[ch] = g;
   return g;
 }
 
-// ─── Params (declared early so build() can reference) ────────────────────
-const params = {
-  charSize:     0.04,
-  extrudeDepth: 0.06,
-  spacing:      1.15,
-  textContent:  'IDENTITY BIOMETRIC AI DATA NEURAL NETWORK',
-  preset:       'marble',
-  roughness:    0.55,
-  metalness:    0.05,
-  color:        '#d8dce2',
-  wireframe:    false,
-  keyIntensity:     1.4,
-  ambientIntensity: 0.3,
-  rimColor:     '#ffeedd',
-  autoRotate:   false,
-  autoRotateSpeed: 1.0,
-  showGrid:     true,
-  bgColor:      '#0f0f12',
-  exportPNG() {
-    renderer.render(scene, camera);
-    const a = document.createElement('a');
-    a.href = renderer.domElement.toDataURL('image/png');
-    a.download = 'fingerprint3d.png';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-  }
-};
-
-// ─── Build instances ─────────────────────────────────────────────────────
-function disposeInstances() {
-  for (const m of meshes) scene.remove(m);
-  meshes   = [];
-  instCount = 0;
-}
+// ─── Build ────────────────────────────────────────────────────────────────
+function disposeInstances() { for (const m of meshes) scene.remove(m); meshes = []; instCount = 0; }
 
 async function build() {
   if (!font || isBuilding) return;
   isBuilding = true;
-
-  const overlay = document.getElementById('building');
-  overlay.style.display = 'flex';
-
-  // Two animation frames so the browser paints the overlay before heavy work
+  document.getElementById('building').style.display = 'flex';
   await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
 
   disposeInstances();
 
   const stepSvg = (params.charSize * params.spacing) / WS;
-  const upper   = params.textContent.toUpperCase();
-  const seq     = upper.split('').filter(c => /\S/.test(c));
-  if (!seq.length) { overlay.style.display = 'none'; isBuilding = false; return; }
+  const seq = params.textContent.split('').filter(c => /\S/.test(c));
+  if (!seq.length) { document.getElementById('building').style.display = 'none'; isBuilding = false; return; }
 
-  // Collect all sampled world-space points
-  const flat = []; // [wx, wy, ang, ...]
-  for (const d of SVG_PATHS) {
-    const pts = samplePath(d, stepSvg);
-    for (let k = 0; k < pts.length; k++) flat.push(pts[k]);
-  }
+  const flat = [];
+  for (const d of SVG_PATHS) { const p = samplePath(d, stepSvg); for (const v of p) flat.push(v); }
 
-  const nPts    = flat.length / 3;
-  const seqLen  = seq.length;
-  const buckets = {}; // char -> [wx,wy,ang,  wx,wy,ang, ...]
-
+  const nPts = flat.length / 3;
+  const buckets = {};
   for (let i = 0; i < nPts; i++) {
-    const c = seq[i % seqLen];
+    const c = seq[i % seq.length];
     if (!buckets[c]) buckets[c] = [];
-    buckets[c].push(flat[i * 3], flat[i * 3 + 1], flat[i * 3 + 2]);
+    buckets[c].push(flat[i*3], flat[i*3+1], flat[i*3+2]);
     instCount++;
   }
 
   const dummy = new THREE.Object3D();
-
   for (const [ch, pts] of Object.entries(buckets)) {
-    const cnt  = pts.length / 3;
-    const geom = getGeom(ch);
-    const mesh = new THREE.InstancedMesh(geom, activeMat, cnt);
-    mesh.castShadow    = true;
-    mesh.receiveShadow = true;
-
+    const cnt = pts.length / 3;
+    const mesh = new THREE.InstancedMesh(getGeom(ch), activeMat, cnt);
+    mesh.castShadow = mesh.receiveShadow = true;
     for (let i = 0; i < cnt; i++) {
-      dummy.position.set(pts[i * 3], pts[i * 3 + 1], 0);
-      dummy.rotation.set(0, 0, pts[i * 3 + 2] + Math.PI * 0.5);
+      dummy.position.set(pts[i*3], pts[i*3+1], 0);
+      dummy.rotation.set(0, 0, pts[i*3+2] + Math.PI * 0.5);
       dummy.scale.setScalar(params.charSize);
       dummy.updateMatrix();
       mesh.setMatrixAt(i, dummy.matrix);
     }
     mesh.instanceMatrix.needsUpdate = true;
-    scene.add(mesh);
-    meshes.push(mesh);
+    scene.add(mesh); meshes.push(mesh);
   }
 
-  overlay.style.display = 'none';
+  document.getElementById('building').style.display = 'none';
   isBuilding = false;
 }
 
-function scheduleBuild(clearGeoms, delay) {
+function schedule(clearGeoms) {
   clearTimeout(buildTimer);
-  buildTimer = setTimeout(() => {
-    if (clearGeoms) clearCache();
-    build();
-  }, delay || 300);
+  buildTimer = setTimeout(() => { if (clearGeoms) clearCache(); build(); }, 300);
 }
 
-// ─── GUI ─────────────────────────────────────────────────────────────────
-let roughCtrl, metaCtrl, colorCtrl, autoRotCtrl;
+// ─── GUI ──────────────────────────────────────────────────────────────────
+let nscaleCtrl;
 
 function setupGUI() {
   const gui = new dat.GUI({ name: 'Fingerprint 3D' });
-  gui.width = 290;
+  gui.width = 295;
 
-  // Typography
   const typo = gui.addFolder('Typography');
-  typo.add(params, 'charSize',     0.01, 0.12,  0.005).name('charSize')
-      .onChange(() => scheduleBuild(false));
-  typo.add(params, 'extrudeDepth', 0.005, 0.25, 0.005).name('extrudeDepth')
-      .onChange(() => scheduleBuild(true));
-  typo.add(params, 'spacing',      0.6, 2.5,    0.05 ).name('spacing')
-      .onChange(() => scheduleBuild(false));
-  typo.add(params, 'textContent').name('textContent')
-      .onFinishChange(() => scheduleBuild(false));
+  typo.add(params, 'charSize',     0.015, 0.12,  0.005).onChange(() => schedule(false));
+  typo.add(params, 'extrudeDepth', 0.02,  0.50,  0.005).onChange(() => schedule(true));
+  typo.add(params, 'spacing',      0.5,   2.5,   0.05 ).onChange(() => schedule(false));
+  typo.add(params, 'textContent').onFinishChange(() => schedule(false));
   typo.open();
 
-  // Material
   const matF = gui.addFolder('Material');
-  matF.add(params, 'preset', Object.keys(MATS)).name('preset').onChange(v => {
+  matF.add(params, 'preset', Object.keys(MATS)).onChange(v => {
     activeMat = MATS[v];
     meshes.forEach(m => { m.material = activeMat; });
-    params.roughness = activeMat.roughness;
-    params.metalness = activeMat.metalness;
-    params.color     = '#' + activeMat.color.getHexString();
-    params.wireframe = activeMat.wireframe || false;
-    roughCtrl && roughCtrl.updateDisplay();
-    metaCtrl  && metaCtrl.updateDisplay();
-    colorCtrl && colorCtrl.updateDisplay();
   });
-  roughCtrl = matF.add(params, 'roughness', 0, 1, 0.01).name('roughness')
-                  .onChange(v => { activeMat.roughness = v; });
-  metaCtrl  = matF.add(params, 'metalness', 0, 1, 0.01).name('metalness')
-                  .onChange(v => { activeMat.metalness = v; });
-  colorCtrl = matF.addColor(params, 'color').name('color')
-                  .onChange(v => { activeMat.color.set(v); });
-  matF.add(params, 'wireframe').name('wireframe')
-      .onChange(v => { activeMat.wireframe = v; });
+  nscaleCtrl = matF.add(params, 'normalScale', 0.0, 4.0, 0.1).name('normal scale').onChange(v => {
+    Object.values(MATS).forEach(m => m.normalScale.set(v, v));
+  });
+  matF.add(params, 'wireframe').onChange(v => { activeMat.wireframe = v; });
   matF.open();
 
-  // Lighting
   const litF = gui.addFolder('Lighting');
-  litF.add(params, 'keyIntensity',     0, 3, 0.05).name('key light')
-      .onChange(v => { keyLight.intensity = v; });
-  litF.add(params, 'ambientIntensity', 0, 1, 0.01).name('ambient')
-      .onChange(v => { ambientLight.intensity = v; });
-  litF.addColor(params, 'rimColor').name('rim color')
-      .onChange(v => { rimLight.color.set(v); });
+  litF.add(params, 'keyIntensity',     0, 5,   0.05).name('key').onChange(v    => { keyLight.intensity  = v; });
+  litF.add(params, 'fillIntensity',    0, 2,   0.05).name('fill').onChange(v   => { fillLight.intensity = v; });
+  litF.add(params, 'rimIntensity',     0, 3,   0.05).name('rim').onChange(v    => { rimLight.intensity  = v; });
+  litF.add(params, 'ambientIntensity', 0, 0.8, 0.01).name('ambient').onChange(v => { ambient.intensity  = v; });
 
-  // Camera
   const camF = gui.addFolder('Camera');
-  autoRotCtrl = camF.add(params, 'autoRotate').name('autoRotate')
-                    .onChange(v => { controls.autoRotate = v; });
-  camF.add(params, 'autoRotateSpeed', 0.5, 5.0, 0.1).name('rotateSpeed')
-      .onChange(v => { controls.autoRotateSpeed = v; });
-  camF.add(params, 'showGrid').name('show grid')
-      .onChange(v => { grid.visible = v; });
-  camF.addColor(params, 'bgColor').name('background')
-      .onChange(v => { scene.background.set(v); });
+  let arCtrl = camF.add(params, 'autoRotate').onChange(v => { controls.autoRotate = v; });
+  camF.add(params, 'autoRotateSpeed', 0.3, 6.0, 0.1).onChange(v => { controls.autoRotateSpeed = v; });
+  camF.add(params, 'showGrid').name('grid').onChange(v => { grid.visible = v; });
+  camF.addColor(params, 'bgColor').name('background').onChange(v => { scene.background.set(v); });
 
   gui.add(params, 'exportPNG').name('⬇ Export PNG');
+
+  return arCtrl;
 }
 
-setupGUI();
+const arCtrl = setupGUI();
 
-// ─── Click canvas to toggle auto-rotate ─────────────────────────────────
+// ─── Click to toggle autoRotate ───────────────────────────────────────────
 let mDown = null;
-renderer.domElement.addEventListener('mousedown', e => {
-  mDown = [e.clientX, e.clientY];
-});
+renderer.domElement.addEventListener('mousedown', e => { mDown = [e.clientX, e.clientY]; });
 renderer.domElement.addEventListener('click', e => {
   if (!mDown) return;
-  const dx = e.clientX - mDown[0], dy = e.clientY - mDown[1];
-  if (Math.hypot(dx, dy) < 5) {
+  if (Math.hypot(e.clientX - mDown[0], e.clientY - mDown[1]) < 5) {
     params.autoRotate = !params.autoRotate;
     controls.autoRotate = params.autoRotate;
-    autoRotCtrl && autoRotCtrl.updateDisplay();
+    arCtrl && arCtrl.updateDisplay();
   }
   mDown = null;
 });
 
-// ─── Resize ──────────────────────────────────────────────────────────────
+// ─── Resize ───────────────────────────────────────────────────────────────
 window.addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
 });
 
-// ─── Animation loop + camera reveal ─────────────────────────────────────
-const REVEAL_MS  = 1500;
-const Z_FROM     = 12;
-const Z_TO       = 6;
-let   revealT0   = null;
-let   revealDone = false;
-
-let lastStatsMs = 0;
-let frameCount  = 0;
-let displayFPS  = 0;
-const statsEl   = document.getElementById('stats');
+// ─── Animate ──────────────────────────────────────────────────────────────
+const REVEAL_MS = 1500; let revealT0 = null, revealDone = false;
+let lastFpsT = 0, frames = 0, fps = 0;
+const statsEl = document.getElementById('stats');
 
 function animate(now) {
   requestAnimationFrame(animate);
 
-  // Camera reveal — ease-out cubic from z=12 → z=6
   if (!revealDone) {
     if (revealT0 === null) revealT0 = now;
-    const t      = Math.min((now - revealT0) / REVEAL_MS, 1.0);
-    const eased  = 1.0 - Math.pow(1.0 - t, 3);
-    camera.position.z = Z_FROM + (Z_TO - Z_FROM) * eased;
+    const t = Math.min((now - revealT0) / REVEAL_MS, 1.0);
+    const e = 1 - Math.pow(1 - t, 3);
+    camera.position.z = 12 + (6 - 12) * e;
     camera.lookAt(0, 0, 0);
-    if (t >= 1.0) {
-      revealDone = true;
-      controls.enabled = true;
-    }
+    if (t >= 1.0) { revealDone = true; controls.enabled = true; }
   } else {
     controls.update();
   }
 
   renderer.render(scene, camera);
 
-  // FPS counter
-  frameCount++;
-  if (now - lastStatsMs >= 1000) {
-    displayFPS  = frameCount;
-    frameCount  = 0;
-    lastStatsMs = now;
-    statsEl.textContent =
-      'Instances: ' + instCount.toLocaleString() + ' | FPS: ' + displayFPS;
+  frames++;
+  if (now - lastFpsT >= 1000) {
+    fps = frames; frames = 0; lastFpsT = now;
+    statsEl.textContent = 'Instances: ' + instCount.toLocaleString() + ' | FPS: ' + fps;
   }
 }
-
 requestAnimationFrame(animate);
 
-// ─── Load font + first build ─────────────────────────────────────────────
-const fontLoader = new THREE.FontLoader();
-fontLoader.load(
-  'https://cdn.jsdelivr.net/npm/three@0.128.0/examples/fonts/helvetiker_bold.typeface.json',
-  loadedFont => {
-    font = loadedFont;
-    build();
-  },
+// ─── Load font ────────────────────────────────────────────────────────────
+new THREE.FontLoader().load(
+  'https://cdn.jsdelivr.net/npm/three@0.128.0/examples/fonts/helvetiker_regular.typeface.json',
+  f => { font = f; build(); },
   undefined,
-  err => {
-    console.error('Font load error:', err);
-    document.getElementById('building').textContent = 'Font load failed. Check console.';
-  }
+  err => { console.error('Font load error', err); document.getElementById('building').textContent = 'Font load failed'; }
 );
 
 })();
