@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fingerprint 3D</title>
+  <style>
+    *, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+    body { background:#000; overflow:hidden; }
+    #app { width:100vw; height:100vh; position:relative; }
+    /* CSS vignette */
+    #app::after {
+      content:''; position:absolute; inset:0; pointer-events:none; z-index:5;
+      background:radial-gradient(ellipse at 50% 50%, transparent 30%, rgba(0,0,0,0.82) 100%);
+    }
+    #stats {
+      position:fixed; bottom:12px; left:12px;
+      font:11px/1.8 monospace; color:rgba(160,175,195,0.5);
+      pointer-events:none; z-index:10;
+    }
+    #building {
+      position:fixed; inset:0; background:rgba(0,0,0,0.93);
+      display:none; align-items:center; justify-content:center;
+      flex-direction:column; gap:18px;
+      font:600 11px/1 monospace; color:#99aabb; letter-spacing:0.25em; z-index:200;
+    }
+    .bar { width:130px; height:1px; background:rgba(255,255,255,0.06); overflow:hidden; }
+    .bar::after {
+      content:''; display:block; width:45%; height:100%;
+      background:linear-gradient(90deg,transparent,#9cf,transparent);
+      animation:sw 1.5s ease-in-out infinite;
+    }
+    @keyframes sw { 0%{transform:translateX(-120%)} 100%{transform:translateX(380%)} }
+  </style>
+</head>
+<body>
+<div id="app"></div>
+<div id="stats">…</div>
+<div id="building">BUILDING <div class="bar"></div></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/FontLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/geometries/TextGeometry.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/CopyShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/BokehShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/EffectComposer.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/RenderPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/ShaderPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/BokehPass.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.7.9/dat.gui.min.js"></script>
+
+<script>
+(function () {
+'use strict';
+
+// ─── Procedural PBR Textures ──────────────────────────────────────────────
+function hash(x, y)  { const s=Math.sin(x*127.1+y*311.7)*43758.5453; return s-Math.floor(s); }
+function vnoise(x,y) {
+  const ix=Math.floor(x),iy=Math.floor(y),fx=x-ix,fy=y-iy;
+  const ux=fx*fx*(3-2*fx),uy=fy*fy*(3-2*fy);
+  const a=hash(ix,iy),b=hash(ix+1,iy),c=hash(ix,iy+1),d=hash(ix+1,iy+1);
+  return a+(b-a)*ux+(c-a)*uy+(a-b-c+d)*ux*uy;
+}
+function fbm(x,y,o){ let v=0,a=0.5,f=1; for(let i=0;i<o;i++,a*=0.5,f*=2) v+=vnoise(x*f,y*f)*a; return v; }
+function clamp(v,lo,hi){ return Math.max(lo,Math.min(hi,v)); }
+
+const S = 256;
+function makeTex(w,h,fn) {
+  const cv=document.createElement('canvas'); cv.width=w; cv.height=h;
+  const ctx=cv.getContext('2d'), img=ctx.createImageData(w,h);
+  for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+    const [r,g,b]=fn(x/w,y/h), i=(y*w+x)*4;
+    img.data[i]=r; img.data[i+1]=g; img.data[i+2]=b; img.data[i+3]=255;
+  }
+  ctx.putImageData(img,0,0);
+  const t=new THREE.CanvasTexture(cv); t.wrapS=t.wrapT=THREE.RepeatWrapping; return t;
+}
+function nrmFromH(hFn,w,h,str) {
+  const hm=new Float32Array(w*h);
+  for(let y=0;y<h;y++) for(let x=0;x<w;x++) hm[y*w+x]=hFn(x/w,y/h);
+  return makeTex(w,h,(nx,ny)=>{
+    const x=Math.round(nx*(w-1)), y=Math.round(ny*(h-1));
+    const dx=(hm[y*w+Math.min(x+1,w-1)]-hm[y*w+Math.max(x-1,0)])*str;
+    const dy=(hm[Math.min(y+1,h-1)*w+x]-hm[Math.max(y-1,0)*w+x])*str;
+    const l=Math.sqrt(dx*dx+dy*dy+1);
+    return [clamp(Math.round((-dx/l*.5+.5)*255),0,255),
+            clamp(Math.round((-dy/l*.5+.5)*255),0,255),
+            clamp(Math.round((1/l*.5+.5)*255),0,255)];
+  });
+}
+
+// ─── Microdetail noise functions (roughness/normal maps only) ─────────────
+const metalH  = (nx,ny)=>fbm(nx*28,ny*1.8,3)*.55+fbm(nx*6,ny*6,2)*.45; // brushed streaks
+const clayH   = (nx,ny)=>fbm(nx*5,ny*5,5);                                // organic bumpy
+const marbleH = (nx,ny)=>Math.abs(Math.sin((nx*6+fbm(nx*3,ny*3,5)*10)*Math.PI))*.3;
+const concrH  = (nx,ny)=>fbm(nx*9,ny*9,6);                                // fine grit
+
+function makeRghMap(hFn,base,variance){
+  return makeTex(S,S,(nx,ny)=>{const v=clamp(Math.round((base+hFn(nx,ny)*variance)*255),0,255);return[v,v,v];});
+}
+
+// Build a material with flat colour + behaviour-defining PBR params.
+// Uses MeshPhysicalMaterial when clearcoat/transmission are needed.
+function makeMat(color,roughness,metalness,hFn,nrmStr,envInt,opts={}){
+  const usePhy=opts.clearcoat||opts.transmission;
+  const M=usePhy?new THREE.MeshPhysicalMaterial():new THREE.MeshStandardMaterial();
+  M.color=new THREE.Color(color);
+  M.roughnessMap=makeRghMap(hFn,Math.max(0,roughness-.06),0.12);
+  M.normalMap=nrmFromH(hFn,S,S,nrmStr);
+  M.normalScale=new THREE.Vector2(0.8,0.8);
+  M.roughness=roughness;
+  M.metalness=metalness;
+  M.envMapIntensity=envInt;
+  if(opts.emissive){M.emissive=new THREE.Color(opts.emissive);M.emissiveIntensity=opts.emissiveInt??0.1;}
+  if(usePhy){
+    M.clearcoat=opts.clearcoat??0;
+    M.clearcoatRoughness=opts.clearcoatRoughness??0;
+    if(opts.transmission!=null){M.transmission=opts.transmission;M.ior=opts.ior??1.5;}
+  }
+  return M;
+}
+
+// Default colours per preset (what the colour picker starts at)
+const MAT_COLORS={
+  silver:   '#b8bcc2',
+  gold:     '#c9942a',
+  marble:   '#e8e4e0',
+  clay:     '#b86050',
+  concrete: '#8e8c88',
+  wax:      '#dfd0a0',
+};
+
+const MATS={
+  // Brushed metal — high metalness, faint clearcoat sheen
+  silver:   makeMat(MAT_COLORS.silver,  0.16,0.92, metalH, 2.2,3.2, {clearcoat:0.25,clearcoatRoughness:0.12}),
+  // Polished gold
+  gold:     makeMat(MAT_COLORS.gold,    0.12,0.95, metalH, 3.0,3.8),
+  // Polished marble — very smooth, strong clearcoat
+  marble:   makeMat(MAT_COLORS.marble,  0.07,0.02, marbleH,4.5,1.6, {clearcoat:0.75,clearcoatRoughness:0.04}),
+  // Matte clay / skin — high roughness, warm SSS emissive
+  clay:     makeMat(MAT_COLORS.clay,    0.82,0.00, clayH,  7.0,0.5, {emissive:'#3a0808',emissiveInt:0.20}),
+  // Rough poured concrete
+  concrete: makeMat(MAT_COLORS.concrete,0.90,0.00, concrH, 9.0,0.4),
+  // ZBrush-style wax — partial transmission + clearcoat + warm SSS glow
+  wax:      makeMat(MAT_COLORS.wax,     0.32,0.00, clayH,  3.5,1.2, {clearcoat:0.50,clearcoatRoughness:0.08,transmission:0.10,ior:1.46,emissive:'#4a2400',emissiveInt:0.10}),
+};
+let activeMat=MATS.silver;
+
+// ─── SVG Fingerprint Paths ────────────────────────────────────────────────
+const SVG_PATHS = [
+  "M276.345 241.707C302.015 238.906 333.72 248.242 355.44 261.592C427.425 305.837 455.535 391.51 454.63 472.25C453.745 550.905 430.975 623.48 390.13 690.46C388.145 693.72 385.155 699.22 380.99 700.16C375.045 700.92 371.46 696.015 373.885 690.595C377.46 682.605 382.67 675.215 387.035 667.575C393.085 656.765 398.725 645.725 403.94 634.485C452.455 528.8 463.805 380.085 373.655 292.556C363.345 283.508 354.13 276.658 341.99 270.134C316.575 256.473 286.06 250.671 257.973 258.914C198.075 276.495 200.213 342.624 189.758 392.535C184.568 419.15 177.177 444.25 164.329 468.3C138.437 516.815 90.8395 546.8 39.8395 563.635C34.661 565.345 28.051 565.505 27.41 558.335C26.864 552.23 34.2445 550.62 38.93 549.04C78.912 535.56 116.551 513.455 141.348 478.57C165.821 444.135 174.5 403.915 180.897 362.9C185.721 331.972 190.218 298.59 210.778 273.542C227.557 253.101 250.548 243.974 276.345 241.707Z",
+  "M285.37 324.712C286.37 324.626 287.33 324.579 288.335 324.617C306.835 325.324 322.2 334.506 334.47 347.978C365.02 381.515 375.175 433.45 372.965 477.55C368.76 561.55 324.7 633.65 263.32 689.03C255.897 695.725 218.002 728.59 210.409 727.13C208.396 726.74 205.589 724.765 204.828 722.795C203.858 720.285 205.458 717.55 207.07 715.72C211.536 710.66 218.957 706.955 224.453 702.905C232.281 697.04 239.917 690.925 247.349 684.565C285.28 651.815 316.08 614.125 336.965 568.235C358.38 521.175 365.705 467.355 353.615 416.7C351.685 408.61 349.07 401.6 346.185 393.875C335.735 367.975 310.39 329.454 276.235 340.522C251.254 348.618 245.719 381.395 242.451 403.855C237.997 434.455 229.678 465.78 216.086 493.77C186.406 556.03 129.297 598.8 65.6305 622.205C60.091 624.24 54.1075 624.5 53.022 617.32C52.0955 611.185 59.7405 609.53 64.0075 607.74C103.961 592.74 141.108 569.575 169.84 537.775C195.76 509.03 212.213 474.54 221.635 437.165C223.981 427.59 226.015 417.94 227.732 408.235C230.67 390.63 232.013 374.005 239.992 357.605C249.427 338.217 263.64 326.612 285.37 324.712Z",
+  "M278.27 154.716C307.955 153.539 339.4 160.477 366.705 171.875C440.17 202.543 503.76 271.522 533.755 344.75C537.655 354.28 552.87 392.21 549.5 399.335C548.825 400.78 547.55 401.865 546.01 402.29C538.425 404.355 536.4 396.735 535.055 391.63C502.47 268.245 377.345 142.138 240.548 173.75C172.249 191.125 133.432 238.478 110.211 302.461C100.998 328.651 93.5735 353.61 78.685 377.47C63.3545 402.345 42.0625 423.355 17.728 439.415C14.3025 441.425 9.6505 444.765 5.7705 441.925C-5.0435 434.01 12.4245 426.28 18.4855 421.92C28.889 414.485 38.4435 405.925 46.975 396.4C63.8865 377.43 76.358 355.795 85.1155 331.86C86.622 327.43 88.499 322.851 89.8425 318.384C117.793 225.43 175.799 159.72 278.27 154.716Z",
+  "M278.335 269.701C288.62 268.127 306.855 270.766 316.64 273.905C354.57 286.071 383.265 314.937 400.945 349.975C428.475 404.535 432.635 470.395 422.035 529.875C419.845 543.805 415.94 556.75 412.14 570.34C409.855 578.51 399.545 578.94 397.935 570.46C397.62 568.795 399.275 563.86 399.855 561.935C419.47 495.965 419.62 423.07 390.13 359.64C368.17 312.398 312.325 266.115 257.298 289.319C241.954 295.79 235.011 311.741 229.83 326.709C223.445 349.853 220.878 370.7 216.971 394.275C210.168 434.01 199.48 470.85 175.963 504.46C145.169 548.195 97.066 577.88 46.822 594.205C38.3645 595.4 35.4765 583.605 43.677 580.765C80.605 567.975 115.304 549.195 143.259 521.6C172.576 492.665 189.234 456.485 198.333 416.7C201.218 403.525 203.679 390.265 205.713 376.935C213.48 328.277 218.118 275.795 278.335 269.701Z",
+  "M268.835 124.708C293.07 122.076 330.12 127.83 353.6 135.101C435.2 160.57 501.78 224.642 542 298.771C544.005 302.47 546.885 310.662 540.965 312.651C534.045 314.976 531.325 308.794 528.585 303.697C467.315 189.717 334.435 100.883 203.923 154.01C152.358 174.374 111.847 220.529 91.1155 270.925C81.74 293.717 75.303 316.218 63.7675 338.227C53.0315 359.12 38.2285 377.66 20.228 392.755C16.15 396.155 8.35049 403.495 2.75849 400.065C-0.406506 398.12 -1.38951 392.95 1.20199 390.14C5.01099 386.125 10.129 383.305 14.323 379.67C38.105 359.07 53.472 331.353 64.2885 302.186C68.398 291.104 72.341 279.569 76.8725 268.547C86.808 243.9 100.549 220.964 117.594 200.575C156.963 154.41 208.675 129.49 268.835 124.708Z",
+  "M292.655 399.595C305.495 398.545 312.685 407.96 314.665 419.65C323.56 472.185 303.94 532.495 276.6 576.8C248.065 623.035 205.417 660.325 159.092 687.72C150.515 692.415 141.905 698.425 132.628 701.47C128.909 702.69 123.915 698.8 123.928 695.57C123.952 689.575 136.5 684.335 141.072 681.845C179.434 660.95 214.256 634.045 242.207 600.33C270.665 566.465 290.2 526.02 299.035 482.675C302.425 465.95 304.22 449.695 302.615 432.62C302.265 428.02 300.83 415.725 295.92 414.17C292.125 416.355 292.365 428.415 291.935 433.33C289.855 456.74 284.905 479.8 277.195 501.995C250.054 580.58 192.457 636.23 118.663 672.515C115.085 673.96 102.966 681.125 99.298 678.39C88.156 670.08 102.778 664.105 106.929 662.255C138.829 648.05 168.441 628.28 193.96 604.565C236.281 565.005 264.69 512.835 274.965 455.82C276.245 449.01 277.18 442.145 277.77 435.24C279.035 420.885 277 405.765 292.655 399.595Z",
+  "M276.27 93.717C281.04 93.4615 285.99 93.628 290.775 93.742C388.68 96.0695 472.23 154.947 530.695 229.863C534.805 235.128 527.43 243.231 521.735 239.466C515.055 233.345 507.71 223.981 501.69 217.233C496.2 211.19 490.595 205.252 484.88 199.422C402.21 116.73 287.615 77.651 178.237 133.052C124.078 160.882 86.4705 206.743 62.8185 262.186C50.4635 290.552 40.8605 320.214 19.293 343.323C14.54 348.416 7.62699 352.403 4.52749 341.485C3.81049 338.959 9.9045 332.322 11.895 330.08C29.544 310.204 38.116 284.05 48.4015 260.009C77.431 189.374 131.007 131.638 204.271 106.696C228.685 98.384 250.399 95.064 276.27 93.717Z",
+  "M276.25 214.213C281.97 213.797 290.375 213.966 295.96 214.429C343.71 218.388 388.45 244.104 419.305 280.13C460.3 327.988 477.56 390.995 481.255 452.81C482.1 466.915 482.315 481.4 481.775 495.55C481.56 497.875 481.265 500.91 479.175 502.375C474.73 505.5 469.085 503.94 468.21 498.245C467.22 491.23 468.325 483.85 468.255 476.72C467.69 419.355 457.355 364.115 427.09 314.628C390.325 256.878 325.25 215.787 254.41 231.339C199.123 243.476 175.818 292.584 160.085 341.263C159.665 342.562 156.987 343.878 155.672 344.091C153.888 344.366 152.072 343.874 150.67 342.737C144.606 337.875 150.285 327.277 152.276 321.373C172.227 262.189 209.536 217.632 276.25 214.213Z",
+  "M279.025 296.682C304.06 293.049 331.955 307.095 349.37 324.237C385.97 360.26 398.515 412.705 399.98 462.395C402.53 548.76 365.135 627.68 305.95 689.22C296.24 699.43 286.095 709.22 275.545 718.555C272.105 721.61 268.775 724.79 264.96 727.445C260.546 730.51 252.304 730.24 253.324 722.925C254.048 717.73 258.003 715.015 261.787 711.915C303.6 675.39 338.335 634.915 361.45 583.69C389.545 521.52 395.02 448.185 371.46 383.62C355.225 339.118 306.165 289.601 256.412 319.333C254.847 320.268 250.583 319.869 249.048 318.907C243.458 315.405 247.912 307.702 252.391 305.456C260.273 300.892 269.705 297.875 279.025 296.682Z",
+  "M285.635 359.09C293.695 358.41 302.455 360.025 309.17 364.92C349.535 394.355 348.695 457.63 341.65 502.26C340.8 507.66 339.94 514.645 337.145 519.07C333.55 524.855 323.99 520.19 325.22 514.04C329.71 491.575 332.78 470.26 331.16 447.2C329.45 422.9 324.545 396.965 305.6 379.755C292.205 367.59 278.92 372.005 272.815 388.335C270.185 395.455 268.645 403.255 267.78 410.8C261.164 468.395 242.141 522.3 204.155 567C175.841 599.875 140.559 626.025 100.874 643.555C95.309 646.04 89.602 648.675 83.9345 650.9C78.121 653.185 71.9445 651.58 72.754 644.2C73.253 639.655 79.2605 637.88 82.712 636.165C120.73 620.385 153.664 599.895 182.618 570.155C220.498 531.275 242.588 480.555 251.321 427.395C255.341 402.925 255.733 365.84 285.635 359.09Z",
+  "M269.745 185.697C279.685 184.508 292.18 185.437 302.25 186.314C311.105 187.085 312.285 197.555 305.08 199.606C300.81 200.821 290.525 199.218 285.25 199.207C277.46 199.114 269.675 199.567 261.95 200.562C228.312 205.134 198.472 220.424 175.899 245.918C145.242 280.542 134.197 324.633 118.717 367.045C103.15 409.695 74.781 443.645 36.717 468.29C30.4365 472.04 22.8775 477.175 15.8325 479.225C12.224 480.27 8.29851 477.415 8.04601 473.52C7.58951 466.475 14.227 465.08 19.189 462.38C44.374 448.67 66.0565 429.33 82.5505 405.875C117.949 355.81 119.743 290.253 160.958 241.957C190.881 206.895 224.105 190.108 269.745 185.697Z",
+  "M271.8 32.2185C310.555 29.2535 355.57 37.894 392.05 50.7385C403.435 54.7475 450.4 74.0245 454.57 83.632C455.21 85.1035 455.38 86.715 454.59 88.181C453.795 89.6605 452.275 90.642 450.715 91.152C448.56 91.8555 446.24 91.6595 444.12 90.937C440.275 89.627 436.62 86.6075 433.04 84.6295C426.315 80.973 419.48 77.5115 412.55 74.2485C340.89 41.14 261.679 35.9075 187.332 63.25C158.752 73.819 132 88.7915 108.045 107.625C96.0635 117.179 86.0675 126.05 75.573 137.255C70.8135 142.294 66.542 147.487 61.745 152.517C57.327 157.151 50.5595 155.824 50.0485 149.103C49.6515 143.876 55.7985 137.991 59.1855 134.238C113.459 73.03 190.096 36.2575 271.8 32.2185Z",
+  "M272.62 63.214C294.38 62.1785 318.135 64.0655 339.395 68.764C343.92 69.764 346.835 74.228 344.525 78.6335C341.385 84.625 334.07 81.923 328.98 80.94C285.495 72.9825 240.688 76.5315 198.997 91.2355C125.789 117.072 73.632 170.837 40.4805 239.938C33.631 254.767 28.393 269.531 22.5155 284.706C22.03 285.959 19.2205 287.519 17.8305 287.583C7.21952 288.071 10.1195 276.877 12.7895 270.625C52.7995 154.31 147.124 69.427 272.62 63.214Z",
+  "M267.79 0.226998C293.71 -0.767002 319.645 1.70199 344.915 7.56799C349.9 8.68699 368.14 10.244 363.9 20.799C363.305 22.277 360.095 24.873 358.485 24.6805C350.49 23.7255 342.45 21.2235 334.455 19.5665C326.83 17.9895 319.15 16.7015 311.425 15.706C270.445 10.688 228.858 15.156 189.877 28.7645C169.697 35.7175 150.427 45.0745 132.483 56.6325C129.486 58.599 124.855 62.0235 121.44 62.6185C115.386 63.576 111.03 55.666 115.928 51.3435C122.084 45.911 130.482 41.1865 137.638 37.174C177.377 14.47 222.048 1.789 267.79 0.226998Z",
+  "M160.728 362.52C172.423 364.12 167.013 376.075 165.578 383.76C150.892 462.43 102.578 515.355 25.82 537.68C20.974 537.045 17.163 533.265 19.2325 528.235C21.096 523.805 25.4825 523.15 29.4505 521.78C66.9095 508.85 102.097 487.505 123.797 453.455C133.668 437.965 140.272 422.75 145.668 405.205C147.748 398.415 149.546 391.535 151.058 384.595C152.292 378.9 153.451 371.63 155.376 366.135C156.082 364.125 158.846 363.13 160.728 362.52Z",
+  "M330.15 191.493C330.6 191.555 331.05 191.616 331.495 191.677C391.335 207.28 440.14 251.226 473.53 301.952C477.52 308.01 477.51 311.575 471.04 315.543C466.905 315.551 465.35 314.474 462.79 311.22C459.84 307.462 457.255 303.323 454.555 299.371C450.91 294.033 447.03 288.864 442.915 283.88C422.335 258.694 399.03 238.079 370.52 222.384C361.74 217.487 352.56 213.339 343.08 209.983C337.605 207.998 327.835 206.463 324.86 201.164C322.21 196.449 326.2 193.287 330.15 191.493Z",
+  "M320 536.09C327.34 535.035 331.14 540.085 328.495 546.835C308.96 596.61 273.68 639.59 233.44 674.215C230.241 676.97 227.301 679.785 223.572 681.83C220.604 682.28 218.033 681.825 216.118 679.395C211.375 673.37 220.206 666.815 224.157 663.595C242.173 648.915 258.086 632.03 272.665 613.96C280.88 603.78 288.66 593.065 295.515 581.85C300.885 572.945 305.78 563.755 310.175 554.33C312.575 549.12 315.745 539.205 320 536.09Z",
+  "M489.61 323.488C492.19 323.56 494.425 324.264 495.825 326.539C501.915 336.45 506.91 348.975 511.25 359.705C525.315 395.355 533.62 433.02 535.86 471.28C536.175 476.145 537.26 485.81 535.535 490.32C534.765 492.34 532.335 493.39 530.38 494.015C527.68 493.8 525.065 493.115 523.625 490.555C523.045 489.52 522.595 487.76 522.555 486.585C522.105 473.95 521.205 461.35 519.675 448.8C516.235 420.18 509.1 392.13 498.44 365.35C495.73 358.685 492.88 352.083 489.89 345.543C486.03 337.216 478.59 328.516 489.61 323.488Z",
+  "M365.045 75.4845C365.515 75.5 366.615 75.5365 367.02 75.648C413.59 88.5675 456.3 114.183 492.125 146.371C496.475 150.279 509.92 160.043 506.895 166.659C506.04 168.528 503.925 169.738 502.16 170.61C500.875 170.608 499.515 170.635 498.265 170.283C497.51 170.07 471.315 146.861 467.915 144.158C446.385 126.758 422.62 112.325 397.25 101.243C389.98 98.13 382.605 95.266 375.135 92.6575C370.65 91.1015 362.695 89.854 360.325 85.7255C359.415 84.148 359.235 82.2515 359.83 80.5295C360.82 77.7505 362.55 76.688 365.045 75.4845Z",
+  "M470.05 516.975C480.29 516.77 478.75 524.72 477.885 532.13C477.495 535.46 476.99 538.8 476.495 542.115C471.28 578.53 461.68 614.185 447.915 648.295C445.505 654.25 443.055 660.46 440.39 666.295C438.66 670.075 437.79 671.63 433.975 672.97C430.25 672.855 424.555 670.195 425.795 665.76C428.045 657.73 432.215 649.56 435.39 641.735C446.53 613.765 454.85 584.76 460.23 555.14C462.395 543.855 463.23 532.45 465.34 521.195C465.715 519.2 468.415 517.81 470.05 516.975Z",
+  "M391.545 592.51C397.715 592.24 402.535 595.63 399.935 602.145C383.755 642.675 358.55 679.26 329.63 711.75C326.61 715.145 324.505 718.265 320.435 720.52C315.79 720.655 310.08 717.34 311.885 712.14C313.495 707.495 320.775 700.49 324.24 696.51C329.98 689.95 335.51 683.21 340.82 676.295C353.415 660.095 364.535 642.805 374.05 624.625C377.235 618.545 380.24 612.37 383.06 606.115C385.2 601.485 387.185 595.07 391.545 592.51Z",
+  "M488.555 384.545C492.135 384.48 495.605 385.245 496.72 388.97C498.79 395.89 500.285 404.415 501.58 411.505C511 462.315 511.135 514.42 501.975 565.28C500.405 574.435 498.24 585.93 495.665 594.88C494.945 597.375 493.445 598.57 491.17 599.595C479.69 599.815 481.765 591.315 483.74 583.485C486.61 572.13 488.555 560.38 490.305 548.805C495.72 513.125 496.26 476.88 491.91 441.06C491.01 433.565 483.295 391.22 483.77 389.275C484.345 386.94 486.655 385.665 488.555 384.545Z",
+  "M134.561 359.97C141.613 360.47 143.444 363.975 142.091 370.69C135.882 401.505 123.851 432.71 103.318 456.765C81.856 481.905 51.002 500.765 19.629 510.45C12.0825 510.815 9.0175 501.485 15.0605 497.93C18.5955 495.85 24.6475 493.915 28.601 492.29C35.691 489.37 42.636 486.11 49.4115 482.52C85.2375 463.195 107.978 434.385 120.956 396.005C124.502 385.52 126.728 374.98 129.617 364.335C130.257 361.975 132.518 360.935 134.561 359.97Z",
+  "M196.211 686.5C206.723 686.27 206.774 696.88 197.191 702.41C187.923 707.755 178.889 715.24 168.889 719.8C160.164 719.91 158.505 710.58 163.132 707.83C173.062 701.925 186.352 691.49 196.211 686.5Z"
+];
+
+// ─── World mapping ────────────────────────────────────────────────────────
+const SVG_W=550, SVG_H=729, WORLD=5.0, WS=WORLD/Math.max(SVG_W,SVG_H);
+function toWorld(sx,sy){ return [(sx-SVG_W*.5)*WS, -(sy-SVG_H*.5)*WS]; }
+
+// ─── Renderer ─────────────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias:true, preserveDrawingBuffer:true, alpha:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setSize(innerWidth,innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.15;
+try { renderer.outputEncoding = THREE.sRGBEncoding; } catch(e){}
+document.getElementById('app').appendChild(renderer.domElement);
+
+// ─── Scene ────────────────────────────────────────────────────────────────
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000000);
+
+// Procedural studio environment map for metallic reflections
+(function buildEnv(){
+  const w=256, h=128, cv=document.createElement('canvas');
+  cv.width=w; cv.height=h;
+  const ctx=cv.getContext('2d');
+  ctx.fillStyle='#030305'; ctx.fillRect(0,0,w,h);
+  // Key light region
+  const g1=ctx.createRadialGradient(w*.18,h*.14,0,w*.18,h*.14,h*.7);
+  g1.addColorStop(0,'rgba(255,253,242,0.92)');
+  g1.addColorStop(.35,'rgba(255,248,228,0.25)');
+  g1.addColorStop(1,'transparent');
+  ctx.fillStyle=g1; ctx.fillRect(0,0,w,h);
+  // Soft fill (right)
+  const g2=ctx.createRadialGradient(w*.82,h*.5,0,w*.82,h*.5,h*.55);
+  g2.addColorStop(0,'rgba(195,215,255,0.12)');
+  g2.addColorStop(1,'transparent');
+  ctx.fillStyle=g2; ctx.fillRect(0,0,w,h);
+  // Subtle floor bounce
+  const g3=ctx.createRadialGradient(w*.5,h*.92,0,w*.5,h*.92,h*.4);
+  g3.addColorStop(0,'rgba(180,200,220,0.08)');
+  g3.addColorStop(1,'transparent');
+  ctx.fillStyle=g3; ctx.fillRect(0,0,w,h);
+
+  const dataTex=new THREE.CanvasTexture(cv);
+  dataTex.mapping=THREE.EquirectangularReflectionMapping;
+  const pmrem=new THREE.PMREMGenerator(renderer);
+  pmrem.compileEquirectangularShader();
+  const env=pmrem.fromEquirectangular(dataTex).texture;
+  scene.environment=env;
+  pmrem.dispose(); dataTex.dispose();
+})();
+
+// ─── Camera ───────────────────────────────────────────────────────────────
+const CAM_END  = new THREE.Vector3(2.2, 2.8, 4.8);
+const CAM_START= CAM_END.clone().multiplyScalar(2.3);
+const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.01, 100);
+camera.position.copy(CAM_START);
+camera.lookAt(0,0,0);
+
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.target.set(0,0,0);
+controls.enabled = false;
+
+// ─── Post-processing ──────────────────────────────────────────────────────
+const composer = new THREE.EffectComposer(renderer);
+composer.addPass(new THREE.RenderPass(scene, camera));
+
+const bokehPass = new THREE.BokehPass(scene, camera, {
+  focus:    6.4,
+  aperture: 0.00022,
+  maxblur:  0.013,
+  width:    innerWidth,
+  height:   innerHeight
+});
+bokehPass.renderToScreen = true;
+composer.addPass(bokehPass);
+
+// ─── Lighting — dramatic near-single-source ───────────────────────────────
+// Minimal ambient — deep shadows in ridges
+const ambient = new THREE.AmbientLight(0xffffff, 0.06);
+scene.add(ambient);
+
+// Key — hot, upper-left, near-point of hard light
+const keyLight = new THREE.DirectionalLight(0xfff9ee, 4.2);
+keyLight.position.set(-3.5, 6.0, 3.0);
+keyLight.castShadow = true;
+keyLight.shadow.mapSize.set(2048,2048);
+keyLight.shadow.camera.left=-7; keyLight.shadow.camera.right=7;
+keyLight.shadow.camera.top=7;  keyLight.shadow.camera.bottom=-7;
+keyLight.shadow.camera.near=1; keyLight.shadow.camera.far=30;
+keyLight.shadow.bias=-0.0004;
+scene.add(keyLight);
+
+// Rim — cool, behind/below, defines edges against black background
+const rimLight = new THREE.DirectionalLight(0xc8deff, 0.55);
+rimLight.position.set(1.5, -2.5, -7.0);
+scene.add(rimLight);
+
+// ─── Fingerprint group — slight diagonal tilt matching reference ──────────
+const fpGroup = new THREE.Group();
+fpGroup.rotation.z = -0.38;   // ~-22° diagonal
+fpGroup.rotation.x = -0.10;   // slight lean toward viewer
+scene.add(fpGroup);
+
+// Subtle grid (hidden by default in dark mode)
+const grid = new THREE.GridHelper(10,10,0x1a1a25,0x111118);
+grid.position.y = -3.5;
+grid.material.transparent=true; grid.material.opacity=0.12;
+grid.visible = false;
+scene.add(grid);
+
+// ─── State ────────────────────────────────────────────────────────────────
+let font=null, geomCache={}, meshes=[], instCount=0, isBuilding=false, buildTimer=null;
+
+const params = {
+  charSize:         0.019,
+  extrudeDepth:     2.0,
+  layers:           1,
+  layerGap:         1.2,
+  spacing:          0.64,
+  textContent:      'Identity Biometric Ai Data Neural Network',
+  preset:           'silver',
+  materialColor:    MAT_COLORS.silver,
+  normalScale:      0.8,
+  wireframe:        false,
+  keyIntensity:     4.2,
+  rimIntensity:     0.55,
+  ambientIntensity: 0.06,
+  dofEnabled:       true,
+  dofFocus:         6.4,
+  dofAperture:      2.2,   // ×0.0001
+  dofMaxBlur:       13,    // ×0.001
+  exposure:         1.15,
+  autoRotate:       false,
+  autoRotateSpeed:  0.6,
+  showGrid:         false,
+  bgColor:          '#000000',
+  exportPNG() {
+    composer.render();
+    const a=document.createElement('a');
+    a.href=renderer.domElement.toDataURL('image/png');
+    a.download='fingerprint3d.png';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  },
+  exportTransparent() {
+    const prevBg=scene.background;
+    const prevWf=activeMat.wireframe;
+    scene.background=null;
+    activeMat.wireframe=false;
+    renderer.setClearColor(0x000000,0);
+    renderer.render(scene,camera);
+    const a=document.createElement('a');
+    a.href=renderer.domElement.toDataURL('image/png');
+    a.download='fingerprint3d_transparent.png';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    scene.background=prevBg;
+    activeMat.wireframe=prevWf;
+    renderer.setClearColor(0x000000,1);
+  }
+};
+
+// ─── SVG Sampler ─────────────────────────────────────────────────────────
+const svgEl=document.createElementNS('http://www.w3.org/2000/svg','svg');
+const pathEl=document.createElementNS('http://www.w3.org/2000/svg','path');
+svgEl.style.cssText='position:absolute;visibility:hidden;pointer-events:none;top:-9999px;left:-9999px;width:0;height:0;';
+svgEl.appendChild(pathEl); document.body.appendChild(svgEl);
+
+function samplePath(d,step){
+  pathEl.setAttribute('d',d);
+  const len=pathEl.getTotalLength(); if(len<1) return [];
+  const out=[];
+  // Use a wider tangent window (proportional to step, min 4 SVG units)
+  // to smooth out jitter from tight curves and avoid abrupt angle flips.
+  const tw=Math.max(step*0.25,4);
+  for(let l=0;l<len;l+=step){
+    const p0=pathEl.getPointAtLength(Math.max(0,l-tw));
+    const p1=pathEl.getPointAtLength(Math.min(l+tw,len));
+    const ang=Math.atan2(p1.y-p0.y,p1.x-p0.x);
+    const pt=pathEl.getPointAtLength(l);
+    const [wx,wy]=toWorld(pt.x,pt.y);
+    out.push(wx,wy,ang);
+  }
+  return out;
+}
+
+// ─── Geometry cache ───────────────────────────────────────────────────────
+function clearCache(){ for(const g of Object.values(geomCache)) g.dispose(); geomCache={}; }
+
+function getGeom(ch){
+  if(geomCache[ch]) return geomCache[ch];
+  const g=new THREE.TextGeometry(ch,{font,size:1.0,height:params.extrudeDepth,curveSegments:4,bevelEnabled:false});
+  g.computeBoundingBox();
+  const c=new THREE.Vector3(); g.boundingBox.getCenter(c);
+  g.translate(-c.x,-c.y,-c.z);
+  geomCache[ch]=g; return g;
+}
+
+// ─── Build ────────────────────────────────────────────────────────────────
+function disposeInstances(){ for(const m of meshes){ fpGroup.remove(m); } meshes=[]; instCount=0; }
+
+async function build(){
+  if(!font||isBuilding) return;
+  isBuilding=true;
+  document.getElementById('building').style.display='flex';
+  await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+
+  disposeInstances();
+  const stepSvg=(params.charSize*params.spacing)/WS;
+  const seq=params.textContent.split('').filter(c=>/\S/.test(c));
+  if(!seq.length){ document.getElementById('building').style.display='none'; isBuilding=false; return; }
+
+  const flat=[];
+  for(const d of SVG_PATHS){ const p=samplePath(d,stepSvg); for(const v of p) flat.push(v); }
+
+  const nLayers=Math.max(1,Math.round(params.layers));
+  const nPts=flat.length/3, seqLen=seq.length, buckets={};
+  for(let i=0;i<nPts;i++){
+    const ang=flat[i*3+2];
+    const perpX=-Math.sin(ang), perpY=Math.cos(ang);
+    const layerSpacing=params.charSize*params.layerGap;
+    for(let L=0;L<nLayers;L++){
+      const offset=(L-(nLayers-1)*0.5)*layerSpacing;
+      const wx=flat[i*3]+perpX*offset, wy=flat[i*3+1]+perpY*offset;
+      const c=seq[(i*nLayers+L)%seqLen];
+      if(!buckets[c]) buckets[c]=[];
+      buckets[c].push(wx,wy,ang);
+      instCount++;
+    }
+  }
+
+  const dummy=new THREE.Object3D();
+  for(const [ch,pts] of Object.entries(buckets)){
+    const cnt=pts.length/3;
+    const mesh=new THREE.InstancedMesh(getGeom(ch),activeMat,cnt);
+    mesh.castShadow=mesh.receiveShadow=true;
+    for(let i=0;i<cnt;i++){
+      dummy.position.set(pts[i*3],pts[i*3+1],0);
+      // Tangent is in SVG coords (Y-down); add PI/2 for perpendicular.
+      // Normalise to (-PI/2, PI/2] so letter tops always face world +Y.
+      let rot=pts[i*3+2]+Math.PI*0.5;
+      rot=rot-Math.PI*Math.round(rot/Math.PI);
+      dummy.rotation.set(0,0,rot);
+      dummy.scale.setScalar(params.charSize);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i,dummy.matrix);
+    }
+    mesh.instanceMatrix.needsUpdate=true;
+    fpGroup.add(mesh); meshes.push(mesh);
+  }
+
+  document.getElementById('building').style.display='none';
+  isBuilding=false;
+}
+
+function schedule(clearGeoms){
+  clearTimeout(buildTimer);
+  buildTimer=setTimeout(()=>{ if(clearGeoms) clearCache(); build(); },300);
+}
+
+// ─── GUI ─────────────────────────────────────────────────────────────────
+function setupGUI(){
+  const gui=new dat.GUI({name:'Fingerprint 3D'}); gui.width=285;
+
+  const typo=gui.addFolder('Typography');
+  typo.add(params,'charSize',     0.008,0.08, 0.002).onChange(()=>schedule(false));
+  typo.add(params,'extrudeDepth', 0.1,  12.0, 0.1  ).onChange(()=>schedule(true));
+  typo.add(params,'layers',       1,    3,    1    ).name('layers (rows)').step(1).onChange(()=>schedule(false));
+  typo.add(params,'layerGap',     0.5,  3.0,  0.05 ).name('row gap').onChange(()=>schedule(false));
+  typo.add(params,'spacing',      0.4,  2.0,  0.04 ).onChange(()=>schedule(false));
+  typo.add(params,'textContent').onFinishChange(()=>schedule(false));
+  typo.open();
+
+  const matF=gui.addFolder('Material');
+  let colorCtrl;
+  matF.add(params,'preset',Object.keys(MATS)).onChange(v=>{
+    activeMat=MATS[v];
+    meshes.forEach(m=>{m.material=activeMat;});
+    // Sync colour picker to preset's default colour
+    params.materialColor='#'+activeMat.color.getHexString();
+    if(colorCtrl) colorCtrl.setValue(params.materialColor);
+  });
+  colorCtrl=matF.addColor(params,'materialColor').name('color').onChange(v=>{
+    activeMat.color.set(v);
+  });
+  matF.add(params,'normalScale',0,4,0.1).name('normal scale').onChange(v=>{
+    Object.values(MATS).forEach(m=>m.normalScale.set(v,v));
+  });
+  matF.add(params,'wireframe').onChange(v=>{activeMat.wireframe=v;});
+  matF.open();
+
+  const dofF=gui.addFolder('Depth of Field');
+  dofF.add(params,'dofEnabled').name('enabled').onChange(v=>{bokehPass.enabled=v;});
+  dofF.add(params,'dofFocus',  1.0,18.0,0.1 ).name('focus').onChange(v=>{bokehPass.uniforms['focus'].value=v;});
+  dofF.add(params,'dofAperture',0,8,0.1).name('aperture ×10⁻⁴').onChange(v=>{bokehPass.uniforms['aperture'].value=v*0.0001;});
+  dofF.add(params,'dofMaxBlur',0,30,0.5).name('max blur ×10⁻³').onChange(v=>{bokehPass.uniforms['maxblur'].value=v*0.001;});
+  dofF.open();
+
+  const litF=gui.addFolder('Lighting');
+  litF.add(params,'keyIntensity',    0,8,0.1).name('key').onChange(v=>{keyLight.intensity=v;});
+  litF.add(params,'rimIntensity',    0,3,0.05).name('rim').onChange(v=>{rimLight.intensity=v;});
+  litF.add(params,'ambientIntensity',0,0.5,0.01).name('ambient').onChange(v=>{ambient.intensity=v;});
+  litF.add(params,'exposure',        0.5,3,0.05).name('exposure').onChange(v=>{renderer.toneMappingExposure=v;});
+
+  const camF=gui.addFolder('Camera');
+  let arCtrl=camF.add(params,'autoRotate').onChange(v=>{controls.autoRotate=v;});
+  camF.add(params,'autoRotateSpeed',0.2,5,0.1).onChange(v=>{controls.autoRotateSpeed=v;});
+  camF.add(params,'showGrid').name('grid').onChange(v=>{grid.visible=v;});
+  camF.addColor(params,'bgColor').name('background').onChange(v=>{scene.background.set(v);});
+  gui.add(params,'exportPNG').name('⬇ Export PNG');
+  gui.add(params,'exportTransparent').name('⬇ Export PNG (transparent)');
+  return arCtrl;
+}
+const arCtrl=setupGUI();
+
+// ─── Click = toggle autoRotate ────────────────────────────────────────────
+let mDown=null;
+renderer.domElement.addEventListener('mousedown',e=>{mDown=[e.clientX,e.clientY];});
+renderer.domElement.addEventListener('click',e=>{
+  if(!mDown) return;
+  if(Math.hypot(e.clientX-mDown[0],e.clientY-mDown[1])<5){
+    params.autoRotate=!params.autoRotate;
+    controls.autoRotate=params.autoRotate;
+    arCtrl&&arCtrl.updateDisplay();
+  }
+  mDown=null;
+});
+
+window.addEventListener('resize',()=>{
+  camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+  composer.setSize(innerWidth,innerHeight);
+});
+
+// ─── Animate ─────────────────────────────────────────────────────────────
+const REVEAL_MS=1800; let revealT0=null, revealDone=false;
+let lastFpsT=0, frames=0, fps=0;
+const statsEl=document.getElementById('stats');
+
+function animate(now){
+  requestAnimationFrame(animate);
+
+  if(!revealDone){
+    if(revealT0===null) revealT0=now;
+    const t=Math.min((now-revealT0)/REVEAL_MS,1.0);
+    const e=1-Math.pow(1-t,3);
+    camera.position.lerpVectors(CAM_START,CAM_END,e);
+    camera.lookAt(0,0,0);
+    if(t>=1.0){ revealDone=true; controls.enabled=true; }
+  } else {
+    controls.update();
+  }
+
+  composer.render();
+  frames++;
+  if(now-lastFpsT>=1000){
+    fps=frames; frames=0; lastFpsT=now;
+    statsEl.textContent='Instances: '+instCount.toLocaleString()+' | FPS: '+fps;
+  }
+}
+requestAnimationFrame(animate);
+
+// ─── Font load ────────────────────────────────────────────────────────────
+new THREE.FontLoader().load(
+  'https://cdn.jsdelivr.net/npm/three@0.128.0/examples/fonts/helvetiker_regular.typeface.json',
+  f=>{ font=f; build(); },
+  undefined,
+  err=>{ console.error('Font error',err); document.getElementById('building').textContent='Font load failed'; }
+);
+
+})();
+</script>
+</body>
+</html>
