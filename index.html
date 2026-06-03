@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fingerprint 3D</title>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0f0f12; overflow: hidden; }
+    #app { width: 100vw; height: 100vh; display: block; }
+    #stats {
+      position: fixed; bottom: 12px; left: 12px;
+      font: 11px/1.8 monospace; color: rgba(200,210,220,0.7);
+      pointer-events: none; z-index: 10;
+      text-shadow: 0 1px 4px rgba(0,0,0,0.8);
+    }
+    #building {
+      position: fixed; inset: 0;
+      background: rgba(10,10,14,0.88);
+      display: none;
+      align-items: center; justify-content: center;
+      flex-direction: column; gap: 14px;
+      font: 700 14px/1 monospace; color: #e0e8ff;
+      letter-spacing: 0.2em; z-index: 200;
+    }
+    #building-bar {
+      width: 200px; height: 2px;
+      background: rgba(255,255,255,0.15);
+      position: relative; overflow: hidden;
+      border-radius: 2px;
+    }
+    #building-bar::after {
+      content: '';
+      position: absolute; top: 0; left: -60%;
+      width: 60%; height: 100%;
+      background: linear-gradient(90deg, transparent, #7df, transparent);
+      animation: slide 1.2s linear infinite;
+    }
+    @keyframes slide { to { left: 160%; } }
+  </style>
+</head>
+<body>
+
+<div id="app"></div>
+<div id="stats">Instances: — | FPS: —</div>
+<div id="building">
+  BUILDING…
+  <div id="building-bar"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/FontLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/geometries/TextGeometry.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.7.9/dat.gui.min.js"></script>
+
+<script>
+(function () {
+'use strict';
+
+// ─── SVG Fingerprint Ridge Paths ──────────────────────────────────────────
+const SVG_PATHS = [
+  "M276.345 241.707C302.015 238.906 333.72 248.242 355.44 261.592C427.425 305.837 455.535 391.51 454.63 472.25C453.745 550.905 430.975 623.48 390.13 690.46C388.145 693.72 385.155 699.22 380.99 700.16C375.045 700.92 371.46 696.015 373.885 690.595C377.46 682.605 382.67 675.215 387.035 667.575C393.085 656.765 398.725 645.725 403.94 634.485C452.455 528.8 463.805 380.085 373.655 292.556C363.345 283.508 354.13 276.658 341.99 270.134C316.575 256.473 286.06 250.671 257.973 258.914C198.075 276.495 200.213 342.624 189.758 392.535C184.568 419.15 177.177 444.25 164.329 468.3C138.437 516.815 90.8395 546.8 39.8395 563.635C34.661 565.345 28.051 565.505 27.41 558.335C26.864 552.23 34.2445 550.62 38.93 549.04C78.912 535.56 116.551 513.455 141.348 478.57C165.821 444.135 174.5 403.915 180.897 362.9C185.721 331.972 190.218 298.59 210.778 273.542C227.557 253.101 250.548 243.974 276.345 241.707Z",
+  "M285.37 324.712C286.37 324.626 287.33 324.579 288.335 324.617C306.835 325.324 322.2 334.506 334.47 347.978C365.02 381.515 375.175 433.45 372.965 477.55C368.76 561.55 324.7 633.65 263.32 689.03C255.897 695.725 218.002 728.59 210.409 727.13C208.396 726.74 205.589 724.765 204.828 722.795C203.858 720.285 205.458 717.55 207.07 715.72C211.536 710.66 218.957 706.955 224.453 702.905C232.281 697.04 239.917 690.925 247.349 684.565C285.28 651.815 316.08 614.125 336.965 568.235C358.38 521.175 365.705 467.355 353.615 416.7C351.685 408.61 349.07 401.6 346.185 393.875C335.735 367.975 310.39 329.454 276.235 340.522C251.254 348.618 245.719 381.395 242.451 403.855C237.997 434.455 229.678 465.78 216.086 493.77C186.406 556.03 129.297 598.8 65.6305 622.205C60.091 624.24 54.1075 624.5 53.022 617.32C52.0955 611.185 59.7405 609.53 64.0075 607.74C103.961 592.74 141.108 569.575 169.84 537.775C195.76 509.03 212.213 474.54 221.635 437.165C223.981 427.59 226.015 417.94 227.732 408.235C230.67 390.63 232.013 374.005 239.992 357.605C249.427 338.217 263.64 326.612 285.37 324.712Z",
+  "M278.27 154.716C307.955 153.539 339.4 160.477 366.705 171.875C440.17 202.543 503.76 271.522 533.755 344.75C537.655 354.28 552.87 392.21 549.5 399.335C548.825 400.78 547.55 401.865 546.01 402.29C538.425 404.355 536.4 396.735 535.055 391.63C502.47 268.245 377.345 142.138 240.548 173.75C172.249 191.125 133.432 238.478 110.211 302.461C100.998 328.651 93.5735 353.61 78.685 377.47C63.3545 402.345 42.0625 423.355 17.728 439.415C14.3025 441.425 9.6505 444.765 5.7705 441.925C-5.0435 434.01 12.4245 426.28 18.4855 421.92C28.889 414.485 38.4435 405.925 46.975 396.4C63.8865 377.43 76.358 355.795 85.1155 331.86C86.622 327.43 88.499 322.851 89.8425 318.384C117.793 225.43 175.799 159.72 278.27 154.716Z",
+  "M278.335 269.701C288.62 268.127 306.855 270.766 316.64 273.905C354.57 286.071 383.265 314.937 400.945 349.975C428.475 404.535 432.635 470.395 422.035 529.875C419.845 543.805 415.94 556.75 412.14 570.34C409.855 578.51 399.545 578.94 397.935 570.46C397.62 568.795 399.275 563.86 399.855 561.935C419.47 495.965 419.62 423.07 390.13 359.64C368.17 312.398 312.325 266.115 257.298 289.319C241.954 295.79 235.011 311.741 229.83 326.709C223.445 349.853 220.878 370.7 216.971 394.275C210.168 434.01 199.48 470.85 175.963 504.46C145.169 548.195 97.066 577.88 46.822 594.205C38.3645 595.4 35.4765 583.605 43.677 580.765C80.605 567.975 115.304 549.195 143.259 521.6C172.576 492.665 189.234 456.485 198.333 416.7C201.218 403.525 203.679 390.265 205.713 376.935C213.48 328.277 218.118 275.795 278.335 269.701Z",
+  "M268.835 124.708C293.07 122.076 330.12 127.83 353.6 135.101C435.2 160.57 501.78 224.642 542 298.771C544.005 302.47 546.885 310.662 540.965 312.651C534.045 314.976 531.325 308.794 528.585 303.697C467.315 189.717 334.435 100.883 203.923 154.01C152.358 174.374 111.847 220.529 91.1155 270.925C81.74 293.717 75.303 316.218 63.7675 338.227C53.0315 359.12 38.2285 377.66 20.228 392.755C16.15 396.155 8.35049 403.495 2.75849 400.065C-0.406506 398.12 -1.38951 392.95 1.20199 390.14C5.01099 386.125 10.129 383.305 14.323 379.67C38.105 359.07 53.472 331.353 64.2885 302.186C68.398 291.104 72.341 279.569 76.8725 268.547C86.808 243.9 100.549 220.964 117.594 200.575C156.963 154.41 208.675 129.49 268.835 124.708Z",
+  "M292.655 399.595C305.495 398.545 312.685 407.96 314.665 419.65C323.56 472.185 303.94 532.495 276.6 576.8C248.065 623.035 205.417 660.325 159.092 687.72C150.515 692.415 141.905 698.425 132.628 701.47C128.909 702.69 123.915 698.8 123.928 695.57C123.952 689.575 136.5 684.335 141.072 681.845C179.434 660.95 214.256 634.045 242.207 600.33C270.665 566.465 290.2 526.02 299.035 482.675C302.425 465.95 304.22 449.695 302.615 432.62C302.265 428.02 300.83 415.725 295.92 414.17C292.125 416.355 292.365 428.415 291.935 433.33C289.855 456.74 284.905 479.8 277.195 501.995C250.054 580.58 192.457 636.23 118.663 672.515C115.085 673.96 102.966 681.125 99.298 678.39C88.156 670.08 102.778 664.105 106.929 662.255C138.829 648.05 168.441 628.28 193.96 604.565C236.281 565.005 264.69 512.835 274.965 455.82C276.245 449.01 277.18 442.145 277.77 435.24C279.035 420.885 277 405.765 292.655 399.595Z",
+  "M276.27 93.717C281.04 93.4615 285.99 93.628 290.775 93.742C388.68 96.0695 472.23 154.947 530.695 229.863C534.805 235.128 527.43 243.231 521.735 239.466C515.055 233.345 507.71 223.981 501.69 217.233C496.2 211.19 490.595 205.252 484.88 199.422C402.21 116.73 287.615 77.651 178.237 133.052C124.078 160.882 86.4705 206.743 62.8185 262.186C50.4635 290.552 40.8605 320.214 19.293 343.323C14.54 348.416 7.62699 352.403 4.52749 341.485C3.81049 338.959 9.9045 332.322 11.895 330.08C29.544 310.204 38.116 284.05 48.4015 260.009C77.431 189.374 131.007 131.638 204.271 106.696C228.685 98.384 250.399 95.064 276.27 93.717Z",
+  "M276.25 214.213C281.97 213.797 290.375 213.966 295.96 214.429C343.71 218.388 388.45 244.104 419.305 280.13C460.3 327.988 477.56 390.995 481.255 452.81C482.1 466.915 482.315 481.4 481.775 495.55C481.56 497.875 481.265 500.91 479.175 502.375C474.73 505.5 469.085 503.94 468.21 498.245C467.22 491.23 468.325 483.85 468.255 476.72C467.69 419.355 457.355 364.115 427.09 314.628C390.325 256.878 325.25 215.787 254.41 231.339C199.123 243.476 175.818 292.584 160.085 341.263C159.665 342.562 156.987 343.878 155.672 344.091C153.888 344.366 152.072 343.874 150.67 342.737C144.606 337.875 150.285 327.277 152.276 321.373C172.227 262.189 209.536 217.632 276.25 214.213Z",
+  "M279.025 296.682C304.06 293.049 331.955 307.095 349.37 324.237C385.97 360.26 398.515 412.705 399.98 462.395C402.53 548.76 365.135 627.68 305.95 689.22C296.24 699.43 286.095 709.22 275.545 718.555C272.105 721.61 268.775 724.79 264.96 727.445C260.546 730.51 252.304 730.24 253.324 722.925C254.048 717.73 258.003 715.015 261.787 711.915C303.6 675.39 338.335 634.915 361.45 583.69C389.545 521.52 395.02 448.185 371.46 383.62C355.225 339.118 306.165 289.601 256.412 319.333C254.847 320.268 250.583 319.869 249.048 318.907C243.458 315.405 247.912 307.702 252.391 305.456C260.273 300.892 269.705 297.875 279.025 296.682Z",
+  "M285.635 359.09C293.695 358.41 302.455 360.025 309.17 364.92C349.535 394.355 348.695 457.63 341.65 502.26C340.8 507.66 339.94 514.645 337.145 519.07C333.55 524.855 323.99 520.19 325.22 514.04C329.71 491.575 332.78 470.26 331.16 447.2C329.45 422.9 324.545 396.965 305.6 379.755C292.205 367.59 278.92 372.005 272.815 388.335C270.185 395.455 268.645 403.255 267.78 410.8C261.164 468.395 242.141 522.3 204.155 567C175.841 599.875 140.559 626.025 100.874 643.555C95.309 646.04 89.602 648.675 83.9345 650.9C78.121 653.185 71.9445 651.58 72.754 644.2C73.253 639.655 79.2605 637.88 82.712 636.165C120.73 620.385 153.664 599.895 182.618 570.155C220.498 531.275 242.588 480.555 251.321 427.395C255.341 402.925 255.733 365.84 285.635 359.09Z",
+  "M269.745 185.697C279.685 184.508 292.18 185.437 302.25 186.314C311.105 187.085 312.285 197.555 305.08 199.606C300.81 200.821 290.525 199.218 285.25 199.207C277.46 199.114 269.675 199.567 261.95 200.562C228.312 205.134 198.472 220.424 175.899 245.918C145.242 280.542 134.197 324.633 118.717 367.045C103.15 409.695 74.781 443.645 36.717 468.29C30.4365 472.04 22.8775 477.175 15.8325 479.225C12.224 480.27 8.29851 477.415 8.04601 473.52C7.58951 466.475 14.227 465.08 19.189 462.38C44.374 448.67 66.0565 429.33 82.5505 405.875C117.949 355.81 119.743 290.253 160.958 241.957C190.881 206.895 224.105 190.108 269.745 185.697Z",
+  "M271.8 32.2185C310.555 29.2535 355.57 37.894 392.05 50.7385C403.435 54.7475 450.4 74.0245 454.57 83.632C455.21 85.1035 455.38 86.715 454.59 88.181C453.795 89.6605 452.275 90.642 450.715 91.152C448.56 91.8555 446.24 91.6595 444.12 90.937C440.275 89.627 436.62 86.6075 433.04 84.6295C426.315 80.973 419.48 77.5115 412.55 74.2485C340.89 41.14 261.679 35.9075 187.332 63.25C158.752 73.819 132 88.7915 108.045 107.625C96.0635 117.179 86.0675 126.05 75.573 137.255C70.8135 142.294 66.542 147.487 61.745 152.517C57.327 157.151 50.5595 155.824 50.0485 149.103C49.6515 143.876 55.7985 137.991 59.1855 134.238C113.459 73.03 190.096 36.2575 271.8 32.2185Z",
+  "M272.62 63.214C294.38 62.1785 318.135 64.0655 339.395 68.764C343.92 69.764 346.835 74.228 344.525 78.6335C341.385 84.625 334.07 81.923 328.98 80.94C285.495 72.9825 240.688 76.5315 198.997 91.2355C125.789 117.072 73.632 170.837 40.4805 239.938C33.631 254.767 28.393 269.531 22.5155 284.706C22.03 285.959 19.2205 287.519 17.8305 287.583C7.21952 288.071 10.1195 276.877 12.7895 270.625C52.7995 154.31 147.124 69.427 272.62 63.214Z",
+  "M267.79 0.226998C293.71 -0.767002 319.645 1.70199 344.915 7.56799C349.9 8.68699 368.14 10.244 363.9 20.799C363.305 22.277 360.095 24.873 358.485 24.6805C350.49 23.7255 342.45 21.2235 334.455 19.5665C326.83 17.9895 319.15 16.7015 311.425 15.706C270.445 10.688 228.858 15.156 189.877 28.7645C169.697 35.7175 150.427 45.0745 132.483 56.6325C129.486 58.599 124.855 62.0235 121.44 62.6185C115.386 63.576 111.03 55.666 115.928 51.3435C122.084 45.911 130.482 41.1865 137.638 37.174C177.377 14.47 222.048 1.789 267.79 0.226998Z",
+  "M160.728 362.52C172.423 364.12 167.013 376.075 165.578 383.76C150.892 462.43 102.578 515.355 25.82 537.68C20.974 537.045 17.163 533.265 19.2325 528.235C21.096 523.805 25.4825 523.15 29.4505 521.78C66.9095 508.85 102.097 487.505 123.797 453.455C133.668 437.965 140.272 422.75 145.668 405.205C147.748 398.415 149.546 391.535 151.058 384.595C152.292 378.9 153.451 371.63 155.376 366.135C156.082 364.125 158.846 363.13 160.728 362.52Z",
+  "M330.15 191.493C330.6 191.555 331.05 191.616 331.495 191.677C391.335 207.28 440.14 251.226 473.53 301.952C477.52 308.01 477.51 311.575 471.04 315.543C466.905 315.551 465.35 314.474 462.79 311.22C459.84 307.462 457.255 303.323 454.555 299.371C450.91 294.033 447.03 288.864 442.915 283.88C422.335 258.694 399.03 238.079 370.52 222.384C361.74 217.487 352.56 213.339 343.08 209.983C337.605 207.998 327.835 206.463 324.86 201.164C322.21 196.449 326.2 193.287 330.15 191.493Z",
+  "M320 536.09C327.34 535.035 331.14 540.085 328.495 546.835C308.96 596.61 273.68 639.59 233.44 674.215C230.241 676.97 227.301 679.785 223.572 681.83C220.604 682.28 218.033 681.825 216.118 679.395C211.375 673.37 220.206 666.815 224.157 663.595C242.173 648.915 258.086 632.03 272.665 613.96C280.88 603.78 288.66 593.065 295.515 581.85C300.885 572.945 305.78 563.755 310.175 554.33C312.575 549.12 315.745 539.205 320 536.09Z",
+  "M489.61 323.488C492.19 323.56 494.425 324.264 495.825 326.539C501.915 336.45 506.91 348.975 511.25 359.705C525.315 395.355 533.62 433.02 535.86 471.28C536.175 476.145 537.26 485.81 535.535 490.32C534.765 492.34 532.335 493.39 530.38 494.015C527.68 493.8 525.065 493.115 523.625 490.555C523.045 489.52 522.595 487.76 522.555 486.585C522.105 473.95 521.205 461.35 519.675 448.8C516.235 420.18 509.1 392.13 498.44 365.35C495.73 358.685 492.88 352.083 489.89 345.543C486.03 337.216 478.59 328.516 489.61 323.488Z",
+  "M365.045 75.4845C365.515 75.5 366.615 75.5365 367.02 75.648C413.59 88.5675 456.3 114.183 492.125 146.371C496.475 150.279 509.92 160.043 506.895 166.659C506.04 168.528 503.925 169.738 502.16 170.61C500.875 170.608 499.515 170.635 498.265 170.283C497.51 170.07 471.315 146.861 467.915 144.158C446.385 126.758 422.62 112.325 397.25 101.243C389.98 98.13 382.605 95.266 375.135 92.6575C370.65 91.1015 362.695 89.854 360.325 85.7255C359.415 84.148 359.235 82.2515 359.83 80.5295C360.82 77.7505 362.55 76.688 365.045 75.4845Z",
+  "M470.05 516.975C480.29 516.77 478.75 524.72 477.885 532.13C477.495 535.46 476.99 538.8 476.495 542.115C471.28 578.53 461.68 614.185 447.915 648.295C445.505 654.25 443.055 660.46 440.39 666.295C438.66 670.075 437.79 671.63 433.975 672.97C430.25 672.855 424.555 670.195 425.795 665.76C428.045 657.73 432.215 649.56 435.39 641.735C446.53 613.765 454.85 584.76 460.23 555.14C462.395 543.855 463.23 532.45 465.34 521.195C465.715 519.2 468.415 517.81 470.05 516.975Z",
+  "M391.545 592.51C397.715 592.24 402.535 595.63 399.935 602.145C383.755 642.675 358.55 679.26 329.63 711.75C326.61 715.145 324.505 718.265 320.435 720.52C315.79 720.655 310.08 717.34 311.885 712.14C313.495 707.495 320.775 700.49 324.24 696.51C329.98 689.95 335.51 683.21 340.82 676.295C353.415 660.095 364.535 642.805 374.05 624.625C377.235 618.545 380.24 612.37 383.06 606.115C385.2 601.485 387.185 595.07 391.545 592.51Z",
+  "M488.555 384.545C492.135 384.48 495.605 385.245 496.72 388.97C498.79 395.89 500.285 404.415 501.58 411.505C511 462.315 511.135 514.42 501.975 565.28C500.405 574.435 498.24 585.93 495.665 594.88C494.945 597.375 493.445 598.57 491.17 599.595C479.69 599.815 481.765 591.315 483.74 583.485C486.61 572.13 488.555 560.38 490.305 548.805C495.72 513.125 496.26 476.88 491.91 441.06C491.01 433.565 483.295 391.22 483.77 389.275C484.345 386.94 486.655 385.665 488.555 384.545Z",
+  "M134.561 359.97C141.613 360.47 143.444 363.975 142.091 370.69C135.882 401.505 123.851 432.71 103.318 456.765C81.856 481.905 51.002 500.765 19.629 510.45C12.0825 510.815 9.0175 501.485 15.0605 497.93C18.5955 495.85 24.6475 493.915 28.601 492.29C35.691 489.37 42.636 486.11 49.4115 482.52C85.2375 463.195 107.978 434.385 120.956 396.005C124.502 385.52 126.728 374.98 129.617 364.335C130.257 361.975 132.518 360.935 134.561 359.97Z",
+  "M196.211 686.5C206.723 686.27 206.774 696.88 197.191 702.41C187.923 707.755 178.889 715.24 168.889 719.8C160.164 719.91 158.505 710.58 163.132 707.83C173.062 701.925 186.352 691.49 196.211 686.5Z"
+];
+
+// ─── World-space mapping ──────────────────────────────────────────────────
+const SVG_W = 550, SVG_H = 729;
+const WORLD = 5.0;
+const WS = WORLD / Math.max(SVG_W, SVG_H);
+
+function toWorld(sx, sy) {
+  return [
+    (sx - SVG_W * 0.5) * WS,
+    -(sy - SVG_H * 0.5) * WS
+  ];
+}
+
+// ─── Renderer + Scene ────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+try { renderer.outputEncoding = THREE.sRGBEncoding; } catch(e) {}
+document.getElementById('app').appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0f0f12);
+
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.01, 100);
+camera.position.set(0, 0, 12);
+
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.enabled = false; // enabled after camera reveal
+
+// ─── Lights ──────────────────────────────────────────────────────────────
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.3);
+scene.add(ambientLight);
+
+const keyLight = new THREE.DirectionalLight(0xffffff, 1.4);
+keyLight.position.set(-3, 4, 5);
+keyLight.castShadow = true;
+keyLight.shadow.mapSize.set(1024, 1024);
+keyLight.shadow.camera.left   = -6;
+keyLight.shadow.camera.right  =  6;
+keyLight.shadow.camera.top    =  6;
+keyLight.shadow.camera.bottom = -6;
+keyLight.shadow.camera.near   =  1;
+keyLight.shadow.camera.far    = 30;
+scene.add(keyLight);
+
+const fillLight = new THREE.DirectionalLight(0xaabbcc, 0.4);
+fillLight.position.set(4, -2, 2);
+scene.add(fillLight);
+
+const rimLight = new THREE.PointLight(0xffeedd, 0.6);
+rimLight.position.set(0, -3, -4);
+scene.add(rimLight);
+
+// ─── Grid ────────────────────────────────────────────────────────────────
+const grid = new THREE.GridHelper(10, 10, 0x3a3a50, 0x2a2a3a);
+grid.position.y = -3;
+grid.material.transparent = true;
+grid.material.opacity = 0.15;
+scene.add(grid);
+
+// ─── Materials ───────────────────────────────────────────────────────────
+const MATS = {
+  marble:   new THREE.MeshStandardMaterial({ color: 0xd8dce2, roughness: 0.55, metalness: 0.05 }),
+  darkHolo: new THREE.MeshStandardMaterial({ color: 0x00e5ff, roughness: 0.20, metalness: 0.80, emissive: new THREE.Color(0x003344), emissiveIntensity: 0.4 }),
+  gold:     new THREE.MeshStandardMaterial({ color: 0xd4a017, roughness: 0.30, metalness: 0.95 }),
+  obsidian: new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.10, metalness: 0.90 }),
+  clay:     new THREE.MeshStandardMaterial({ color: 0xe8d5c0, roughness: 0.90, metalness: 0.00 }),
+};
+let activeMat = MATS.marble;
+
+// ─── State ───────────────────────────────────────────────────────────────
+let font       = null;
+let geomCache  = {};
+let meshes     = [];
+let instCount  = 0;
+let isBuilding = false;
+let buildTimer = null;
+
+// ─── Hidden SVG sampler ──────────────────────────────────────────────────
+const svgEl  = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+const pathEl = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+svgEl.style.cssText = 'position:absolute;visibility:hidden;pointer-events:none;top:-9999px;left:-9999px;width:0;height:0;';
+svgEl.appendChild(pathEl);
+document.body.appendChild(svgEl);
+
+function samplePath(d, stepSvg) {
+  pathEl.setAttribute('d', d);
+  const len = pathEl.getTotalLength();
+  if (len < 1) return [];
+  const out = [];
+  for (let l = 0; l < len; l += stepSvg) {
+    const p0 = pathEl.getPointAtLength(l);
+    const p1 = pathEl.getPointAtLength(Math.min(l + 0.5, len));
+    const ang = Math.atan2(p1.y - p0.y, p1.x - p0.x);
+    const [wx, wy] = toWorld(p0.x, p0.y);
+    out.push(wx, wy, ang);
+  }
+  return out;
+}
+
+// ─── Geometry cache ──────────────────────────────────────────────────────
+function clearCache() {
+  for (const g of Object.values(geomCache)) g.dispose();
+  geomCache = {};
+}
+
+function getGeom(char) {
+  if (geomCache[char]) return geomCache[char];
+  const g = new THREE.TextGeometry(char, {
+    font,
+    size:         1.0,
+    height:       params.extrudeDepth,
+    curveSegments: 3,
+    bevelEnabled: false,
+  });
+  g.computeBoundingBox();
+  const c = new THREE.Vector3();
+  g.boundingBox.getCenter(c);
+  g.translate(-c.x, -c.y, -c.z);
+  geomCache[char] = g;
+  return g;
+}
+
+// ─── Params (declared early so build() can reference) ────────────────────
+const params = {
+  charSize:     0.04,
+  extrudeDepth: 0.06,
+  spacing:      1.15,
+  textContent:  'IDENTITY BIOMETRIC AI DATA NEURAL NETWORK',
+  preset:       'marble',
+  roughness:    0.55,
+  metalness:    0.05,
+  color:        '#d8dce2',
+  wireframe:    false,
+  keyIntensity:     1.4,
+  ambientIntensity: 0.3,
+  rimColor:     '#ffeedd',
+  autoRotate:   false,
+  autoRotateSpeed: 1.0,
+  showGrid:     true,
+  bgColor:      '#0f0f12',
+  exportPNG() {
+    renderer.render(scene, camera);
+    const a = document.createElement('a');
+    a.href = renderer.domElement.toDataURL('image/png');
+    a.download = 'fingerprint3d.png';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+};
+
+// ─── Build instances ─────────────────────────────────────────────────────
+function disposeInstances() {
+  for (const m of meshes) scene.remove(m);
+  meshes   = [];
+  instCount = 0;
+}
+
+async function build() {
+  if (!font || isBuilding) return;
+  isBuilding = true;
+
+  const overlay = document.getElementById('building');
+  overlay.style.display = 'flex';
+
+  // Two animation frames so the browser paints the overlay before heavy work
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+  disposeInstances();
+
+  const stepSvg = (params.charSize * params.spacing) / WS;
+  const upper   = params.textContent.toUpperCase();
+  const seq     = upper.split('').filter(c => /\S/.test(c));
+  if (!seq.length) { overlay.style.display = 'none'; isBuilding = false; return; }
+
+  // Collect all sampled world-space points
+  const flat = []; // [wx, wy, ang, ...]
+  for (const d of SVG_PATHS) {
+    const pts = samplePath(d, stepSvg);
+    for (let k = 0; k < pts.length; k++) flat.push(pts[k]);
+  }
+
+  const nPts    = flat.length / 3;
+  const seqLen  = seq.length;
+  const buckets = {}; // char -> [wx,wy,ang,  wx,wy,ang, ...]
+
+  for (let i = 0; i < nPts; i++) {
+    const c = seq[i % seqLen];
+    if (!buckets[c]) buckets[c] = [];
+    buckets[c].push(flat[i * 3], flat[i * 3 + 1], flat[i * 3 + 2]);
+    instCount++;
+  }
+
+  const dummy = new THREE.Object3D();
+
+  for (const [ch, pts] of Object.entries(buckets)) {
+    const cnt  = pts.length / 3;
+    const geom = getGeom(ch);
+    const mesh = new THREE.InstancedMesh(geom, activeMat, cnt);
+    mesh.castShadow    = true;
+    mesh.receiveShadow = true;
+
+    for (let i = 0; i < cnt; i++) {
+      dummy.position.set(pts[i * 3], pts[i * 3 + 1], 0);
+      dummy.rotation.set(0, 0, pts[i * 3 + 2] + Math.PI * 0.5);
+      dummy.scale.setScalar(params.charSize);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+    scene.add(mesh);
+    meshes.push(mesh);
+  }
+
+  overlay.style.display = 'none';
+  isBuilding = false;
+}
+
+function scheduleBuild(clearGeoms, delay) {
+  clearTimeout(buildTimer);
+  buildTimer = setTimeout(() => {
+    if (clearGeoms) clearCache();
+    build();
+  }, delay || 300);
+}
+
+// ─── GUI ─────────────────────────────────────────────────────────────────
+let roughCtrl, metaCtrl, colorCtrl, autoRotCtrl;
+
+function setupGUI() {
+  const gui = new dat.GUI({ name: 'Fingerprint 3D' });
+  gui.width = 290;
+
+  // Typography
+  const typo = gui.addFolder('Typography');
+  typo.add(params, 'charSize',     0.01, 0.12,  0.005).name('charSize')
+      .onChange(() => scheduleBuild(false));
+  typo.add(params, 'extrudeDepth', 0.005, 0.25, 0.005).name('extrudeDepth')
+      .onChange(() => scheduleBuild(true));
+  typo.add(params, 'spacing',      0.6, 2.5,    0.05 ).name('spacing')
+      .onChange(() => scheduleBuild(false));
+  typo.add(params, 'textContent').name('textContent')
+      .onFinishChange(() => scheduleBuild(false));
+  typo.open();
+
+  // Material
+  const matF = gui.addFolder('Material');
+  matF.add(params, 'preset', Object.keys(MATS)).name('preset').onChange(v => {
+    activeMat = MATS[v];
+    meshes.forEach(m => { m.material = activeMat; });
+    params.roughness = activeMat.roughness;
+    params.metalness = activeMat.metalness;
+    params.color     = '#' + activeMat.color.getHexString();
+    params.wireframe = activeMat.wireframe || false;
+    roughCtrl && roughCtrl.updateDisplay();
+    metaCtrl  && metaCtrl.updateDisplay();
+    colorCtrl && colorCtrl.updateDisplay();
+  });
+  roughCtrl = matF.add(params, 'roughness', 0, 1, 0.01).name('roughness')
+                  .onChange(v => { activeMat.roughness = v; });
+  metaCtrl  = matF.add(params, 'metalness', 0, 1, 0.01).name('metalness')
+                  .onChange(v => { activeMat.metalness = v; });
+  colorCtrl = matF.addColor(params, 'color').name('color')
+                  .onChange(v => { activeMat.color.set(v); });
+  matF.add(params, 'wireframe').name('wireframe')
+      .onChange(v => { activeMat.wireframe = v; });
+  matF.open();
+
+  // Lighting
+  const litF = gui.addFolder('Lighting');
+  litF.add(params, 'keyIntensity',     0, 3, 0.05).name('key light')
+      .onChange(v => { keyLight.intensity = v; });
+  litF.add(params, 'ambientIntensity', 0, 1, 0.01).name('ambient')
+      .onChange(v => { ambientLight.intensity = v; });
+  litF.addColor(params, 'rimColor').name('rim color')
+      .onChange(v => { rimLight.color.set(v); });
+
+  // Camera
+  const camF = gui.addFolder('Camera');
+  autoRotCtrl = camF.add(params, 'autoRotate').name('autoRotate')
+                    .onChange(v => { controls.autoRotate = v; });
+  camF.add(params, 'autoRotateSpeed', 0.5, 5.0, 0.1).name('rotateSpeed')
+      .onChange(v => { controls.autoRotateSpeed = v; });
+  camF.add(params, 'showGrid').name('show grid')
+      .onChange(v => { grid.visible = v; });
+  camF.addColor(params, 'bgColor').name('background')
+      .onChange(v => { scene.background.set(v); });
+
+  gui.add(params, 'exportPNG').name('⬇ Export PNG');
+}
+
+setupGUI();
+
+// ─── Click canvas to toggle auto-rotate ─────────────────────────────────
+let mDown = null;
+renderer.domElement.addEventListener('mousedown', e => {
+  mDown = [e.clientX, e.clientY];
+});
+renderer.domElement.addEventListener('click', e => {
+  if (!mDown) return;
+  const dx = e.clientX - mDown[0], dy = e.clientY - mDown[1];
+  if (Math.hypot(dx, dy) < 5) {
+    params.autoRotate = !params.autoRotate;
+    controls.autoRotate = params.autoRotate;
+    autoRotCtrl && autoRotCtrl.updateDisplay();
+  }
+  mDown = null;
+});
+
+// ─── Resize ──────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ─── Animation loop + camera reveal ─────────────────────────────────────
+const REVEAL_MS  = 1500;
+const Z_FROM     = 12;
+const Z_TO       = 6;
+let   revealT0   = null;
+let   revealDone = false;
+
+let lastStatsMs = 0;
+let frameCount  = 0;
+let displayFPS  = 0;
+const statsEl   = document.getElementById('stats');
+
+function animate(now) {
+  requestAnimationFrame(animate);
+
+  // Camera reveal — ease-out cubic from z=12 → z=6
+  if (!revealDone) {
+    if (revealT0 === null) revealT0 = now;
+    const t      = Math.min((now - revealT0) / REVEAL_MS, 1.0);
+    const eased  = 1.0 - Math.pow(1.0 - t, 3);
+    camera.position.z = Z_FROM + (Z_TO - Z_FROM) * eased;
+    camera.lookAt(0, 0, 0);
+    if (t >= 1.0) {
+      revealDone = true;
+      controls.enabled = true;
+    }
+  } else {
+    controls.update();
+  }
+
+  renderer.render(scene, camera);
+
+  // FPS counter
+  frameCount++;
+  if (now - lastStatsMs >= 1000) {
+    displayFPS  = frameCount;
+    frameCount  = 0;
+    lastStatsMs = now;
+    statsEl.textContent =
+      'Instances: ' + instCount.toLocaleString() + ' | FPS: ' + displayFPS;
+  }
+}
+
+requestAnimationFrame(animate);
+
+// ─── Load font + first build ─────────────────────────────────────────────
+const fontLoader = new THREE.FontLoader();
+fontLoader.load(
+  'https://cdn.jsdelivr.net/npm/three@0.128.0/examples/fonts/helvetiker_bold.typeface.json',
+  loadedFont => {
+    font = loadedFont;
+    build();
+  },
+  undefined,
+  err => {
+    console.error('Font load error:', err);
+    document.getElementById('building').textContent = 'Font load failed. Check console.';
+  }
+);
+
+})();
+</script>
+</body>
+</html>
