@@ -90,44 +90,62 @@ function nrmFromH(hFn,w,h,str) {
   });
 }
 
-function pbrMat(col,rgh,nrm,roughness,metalness,nscale,envInt){
-  return new THREE.MeshStandardMaterial({
-    map:col, roughnessMap:rgh, normalMap:nrm,
-    normalScale:new THREE.Vector2(nscale,nscale),
-    roughness, metalness, envMapIntensity:envInt
-  });
+// ─── Microdetail noise functions (roughness/normal maps only) ─────────────
+const metalH  = (nx,ny)=>fbm(nx*28,ny*1.8,3)*.55+fbm(nx*6,ny*6,2)*.45; // brushed streaks
+const clayH   = (nx,ny)=>fbm(nx*5,ny*5,5);                                // organic bumpy
+const marbleH = (nx,ny)=>Math.abs(Math.sin((nx*6+fbm(nx*3,ny*3,5)*10)*Math.PI))*.3;
+const concrH  = (nx,ny)=>fbm(nx*9,ny*9,6);                                // fine grit
+
+function makeRghMap(hFn,base,variance){
+  return makeTex(S,S,(nx,ny)=>{const v=clamp(Math.round((base+hFn(nx,ny)*variance)*255),0,255);return[v,v,v];});
 }
 
-// Silver — brushed satin, high metalness
-const silverH = (nx,ny)=>fbm(nx*28,ny*1.8,3)*.55+fbm(nx*6,ny*6,2)*.45;
-const MATS = {
-  silver: pbrMat(
-    makeTex(S,S,(nx,ny)=>{const n=silverH(nx,ny),v=clamp(Math.round(228+n*16-8),0,255);return[v,v,v+3];}),
-    makeTex(S,S,(nx,ny)=>{const v=Math.round((.12+silverH(nx,ny)*.17)*255);return[v,v,v];}),
-    nrmFromH(silverH,S,S,2.2), 0.18,0.92,0.8,3.0),
+// Build a material with flat colour + behaviour-defining PBR params.
+// Uses MeshPhysicalMaterial when clearcoat/transmission are needed.
+function makeMat(color,roughness,metalness,hFn,nrmStr,envInt,opts={}){
+  const usePhy=opts.clearcoat||opts.transmission;
+  const M=usePhy?new THREE.MeshPhysicalMaterial():new THREE.MeshStandardMaterial();
+  M.color=new THREE.Color(color);
+  M.roughnessMap=makeRghMap(hFn,Math.max(0,roughness-.06),0.12);
+  M.normalMap=nrmFromH(hFn,S,S,nrmStr);
+  M.normalScale=new THREE.Vector2(0.8,0.8);
+  M.roughness=roughness;
+  M.metalness=metalness;
+  M.envMapIntensity=envInt;
+  if(opts.emissive){M.emissive=new THREE.Color(opts.emissive);M.emissiveIntensity=opts.emissiveInt??0.1;}
+  if(usePhy){
+    M.clearcoat=opts.clearcoat??0;
+    M.clearcoatRoughness=opts.clearcoatRoughness??0;
+    if(opts.transmission!=null){M.transmission=opts.transmission;M.ior=opts.ior??1.5;}
+  }
+  return M;
+}
 
-  marble: pbrMat(
-    makeTex(S,S,(nx,ny)=>{const v=Math.abs(Math.sin((nx*6+fbm(nx*3,ny*3,5)*10)*Math.PI));const b=Math.round(242-v*50);return[clamp(b+4,0,255),clamp(b,0,255),clamp(b-4,0,255)];}),
-    makeTex(S,S,(nx,ny)=>{const v=Math.round((.04+Math.abs(Math.sin((nx*6+fbm(nx*3,ny*3,5)*10)*Math.PI))*.16)*255);return[v,v,v];}),
-    nrmFromH((nx,ny)=>Math.abs(Math.sin((nx*6+fbm(nx*3,ny*3,5)*10)*Math.PI))*.3,S,S,4.5), 0.10,0.04,0.9,1.2),
-
-  clay: Object.assign(pbrMat(
-    makeTex(S,S,(nx,ny)=>{const n=fbm(nx*4,ny*4,4);return[clamp(Math.round(210+n*24-12),0,255),clamp(Math.round(155+n*18-9),0,255),clamp(Math.round(130+n*14-7),0,255)];}),
-    makeTex(S,S,(nx,ny)=>{const v=Math.round((.55+fbm(nx*5,ny*5,5)*.4)*255);return[v,v,v];}),
-    nrmFromH((nx,ny)=>fbm(nx*5,ny*5,5),S,S,7.0), 0.95,0.00,1.4,0.5),
-    {emissive:new THREE.Color(0x3a0808),emissiveIntensity:0.22}),
-
-  concrete: pbrMat(
-    makeTex(S,S,(nx,ny)=>{const n=fbm(nx*9,ny*9,6);const b=Math.round(118+n*55-20);return[clamp(b+3,0,255),clamp(b+1,0,255),clamp(b,0,255)];}),
-    makeTex(S,S,(nx,ny)=>{const v=Math.round((.45+fbm(nx*9,ny*9,6)*.55)*255);return[v,v,v];}),
-    nrmFromH((nx,ny)=>fbm(nx*9,ny*9,6),S,S,9.0), 0.88,0.00,1.8,0.4),
-
-  gold: pbrMat(
-    makeTex(S,S,(nx,ny)=>{const n=fbm(nx*22,ny*1.2,3)*.6+fbm(nx*14+3,ny*2,2)*.4;return[clamp(Math.round(212+n*28-14),0,255),clamp(Math.round(168+n*22-11),0,255),clamp(Math.round(46+n*14-7),0,255)];}),
-    makeTex(S,S,(nx,ny)=>{const v=Math.round((.06+(fbm(nx*22,ny*1.2,3)*.6+fbm(nx*14+3,ny*2,2)*.4)*.22)*255);return[v,v,v];}),
-    nrmFromH((nx,ny)=>fbm(nx*22,ny*1.2,3)*.6+fbm(nx*14+3,ny*2,2)*.4,S,S,3.0), 0.10,0.95,0.7,3.0),
+// Default colours per preset (what the colour picker starts at)
+const MAT_COLORS={
+  silver:   '#b8bcc2',
+  gold:     '#c9942a',
+  marble:   '#e8e4e0',
+  clay:     '#b86050',
+  concrete: '#8e8c88',
+  wax:      '#dfd0a0',
 };
-let activeMat = MATS.silver;
+
+const MATS={
+  // Brushed metal — high metalness, faint clearcoat sheen
+  silver:   makeMat(MAT_COLORS.silver,  0.16,0.92, metalH, 2.2,3.2, {clearcoat:0.25,clearcoatRoughness:0.12}),
+  // Polished gold
+  gold:     makeMat(MAT_COLORS.gold,    0.12,0.95, metalH, 3.0,3.8),
+  // Polished marble — very smooth, strong clearcoat
+  marble:   makeMat(MAT_COLORS.marble,  0.07,0.02, marbleH,4.5,1.6, {clearcoat:0.75,clearcoatRoughness:0.04}),
+  // Matte clay / skin — high roughness, warm SSS emissive
+  clay:     makeMat(MAT_COLORS.clay,    0.82,0.00, clayH,  7.0,0.5, {emissive:'#3a0808',emissiveInt:0.20}),
+  // Rough poured concrete
+  concrete: makeMat(MAT_COLORS.concrete,0.90,0.00, concrH, 9.0,0.4),
+  // ZBrush-style wax — partial transmission + clearcoat + warm SSS glow
+  wax:      makeMat(MAT_COLORS.wax,     0.32,0.00, clayH,  3.5,1.2, {clearcoat:0.50,clearcoatRoughness:0.08,transmission:0.10,ior:1.46,emissive:'#4a2400',emissiveInt:0.10}),
+};
+let activeMat=MATS.silver;
 
 // ─── SVG Fingerprint Paths ────────────────────────────────────────────────
 const SVG_PATHS = [
@@ -280,6 +298,7 @@ const params = {
   spacing:          0.64,
   textContent:      'Identity Biometric Ai Data Neural Network',
   preset:           'silver',
+  materialColor:    MAT_COLORS.silver,
   normalScale:      0.8,
   wireframe:        false,
   keyIntensity:     4.2,
@@ -328,10 +347,15 @@ function samplePath(d,step){
   pathEl.setAttribute('d',d);
   const len=pathEl.getTotalLength(); if(len<1) return [];
   const out=[];
+  // Use a wider tangent window (proportional to step, min 4 SVG units)
+  // to smooth out jitter from tight curves and avoid abrupt angle flips.
+  const tw=Math.max(step*0.25,4);
   for(let l=0;l<len;l+=step){
-    const p0=pathEl.getPointAtLength(l), p1=pathEl.getPointAtLength(Math.min(l+0.5,len));
+    const p0=pathEl.getPointAtLength(Math.max(0,l-tw));
+    const p1=pathEl.getPointAtLength(Math.min(l+tw,len));
     const ang=Math.atan2(p1.y-p0.y,p1.x-p0.x);
-    const [wx,wy]=toWorld(p0.x,p0.y);
+    const pt=pathEl.getPointAtLength(l);
+    const [wx,wy]=toWorld(pt.x,pt.y);
     out.push(wx,wy,ang);
   }
   return out;
@@ -389,8 +413,10 @@ async function build(){
     mesh.castShadow=mesh.receiveShadow=true;
     for(let i=0;i<cnt;i++){
       dummy.position.set(pts[i*3],pts[i*3+1],0);
+      // Tangent is in SVG coords (Y-down); add PI/2 for perpendicular.
+      // Normalise to (-PI/2, PI/2] so letter tops always face world +Y.
       let rot=pts[i*3+2]+Math.PI*0.5;
-      if(Math.cos(rot)<0) rot-=Math.PI;
+      rot=rot-Math.PI*Math.round(rot/Math.PI);
       dummy.rotation.set(0,0,rot);
       dummy.scale.setScalar(params.charSize);
       dummy.updateMatrix();
@@ -423,8 +449,16 @@ function setupGUI(){
   typo.open();
 
   const matF=gui.addFolder('Material');
+  let colorCtrl;
   matF.add(params,'preset',Object.keys(MATS)).onChange(v=>{
-    activeMat=MATS[v]; meshes.forEach(m=>{m.material=activeMat;});
+    activeMat=MATS[v];
+    meshes.forEach(m=>{m.material=activeMat;});
+    // Sync colour picker to preset's default colour
+    params.materialColor='#'+activeMat.color.getHexString();
+    if(colorCtrl) colorCtrl.setValue(params.materialColor);
+  });
+  colorCtrl=matF.addColor(params,'materialColor').name('color').onChange(v=>{
+    activeMat.color.set(v);
   });
   matF.add(params,'normalScale',0,4,0.1).name('normal scale').onChange(v=>{
     Object.values(MATS).forEach(m=>m.normalScale.set(v,v));
