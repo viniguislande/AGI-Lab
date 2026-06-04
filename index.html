@@ -289,7 +289,7 @@ scene.add(grid);
 
 // ─── State ────────────────────────────────────────────────────────────────
 let font=null, geomCache={}, meshes=[], instCount=0, isBuilding=false, buildTimer=null;
-let animData=[], scatterCurrent=0, lastNow=null, scatterCtrl=null;
+let animData=[], scatterCurrent=0, lastNow=null, scatterCtrl=null, terrainNRows=1;
 
 const params = {
   scatter:          0.0,
@@ -376,51 +376,73 @@ function getGeom(ch){
 }
 
 // ─── Terrain position generator ───────────────────────────────────────────
-// xStep/yStep match fingerprint spacing so character density is identical.
-// Lines are short (≤2.5 world-units), numerous, and spread to ±3.5 in X
-// so the scatter→fingerprint transition looks like lateral convergence.
+// Returns {pts, lineIdx, nRows}.
+// Guarantees pts.length/3 === n — nRows is computed from the MINIMUM
+// possible rowLen (0.5×maxPerLine) so we never run out of positions.
 function generateTerrainPositions(n, xStep, yStep){
-  const maxLineW = 2.5;
-  const maxPerLine = Math.max(8, Math.floor(maxLineW / xStep));
-  const nRows = Math.ceil(n / maxPerLine);
-  // Vertical gap: fill ≈5 world-units, but never tighter than 1.5× charSize
-  const rowGap = Math.max(yStep * 1.5, 5.0 / (nRows + 1));
-  const pts = [];
-  for(let r=0; r<nRows && pts.length<n; r++){
-    // Variable line length: 50–100% of max (deterministic via hash)
-    const rowLen = Math.floor(maxPerLine * (0.5 + hash(r,3)*0.5));
+  const maxLineW  = 2.5;
+  const maxPerLine= Math.max(8, Math.floor(maxLineW / xStep));
+  const minPerLine= Math.max(4, Math.floor(maxPerLine * 0.5));
+  // Enough rows even if every row generates only minPerLine positions
+  const nRows     = Math.ceil(n / minPerLine) + 3;
+  const rowGap    = Math.max(yStep * 1.5, 5.0 / (nRows + 1));
+  const pts=[], lineIdx=[];
+  let usedRows=0;
+  for(let r=0; r<nRows && pts.length/3 < n; r++){
+    usedRows=r+1;
+    // Cap at remaining needed so we hit exactly n
+    const remaining = n - pts.length/3;
+    const rowLen = Math.min(remaining, Math.floor(maxPerLine*(0.5+hash(r,3)*0.5)));
     const lineW  = rowLen * xStep;
-    // Horizontal drift so lines spread into ±3.5 range (wider than fingerprint)
     const maxDrift = Math.max(0, 3.5 - lineW*0.5);
     const xCenter  = (hash(r,4)*2-1)*maxDrift;
     const baseY    = (nRows*0.5 - r - 0.5)*rowGap;
     const amp   = 0.02 + hash(r,0)*0.12;
     const freq  = 1.5  + hash(r,1)*4.0;
     const phase = hash(r,2)*Math.PI*2;
-    for(let c=0; c<rowLen && pts.length<n; c++){
+    for(let c=0; c<rowLen; c++){
       const x  = xCenter - lineW*0.5 + c*xStep;
       const y  = baseY + amp*Math.sin(freq*x+phase);
       const dy = amp*freq*Math.cos(freq*x+phase);
       let rot  = Math.atan2(dy,1);
       rot = rot-Math.PI*Math.round(rot/Math.PI);
       pts.push(x,y,rot);
+      lineIdx.push(r);
     }
   }
-  return pts;
+  return {pts, lineIdx, nRows: usedRows};
 }
 
+function smoothstep(lo,hi,x){ const t=Math.max(0,Math.min(1,(x-lo)/(hi-lo))); return t*t*(3-2*t); }
+
 // ─── Scatter update (called every frame during transition) ────────────────
+// Each terrain row slides in as a rigid unit from outside the viewport,
+// staggered top-to-bottom.  Characters in a row share the same lineT.
 function updateScatter(t){
   if(!animData.length) return;
   const dummy=new THREE.Object3D();
+  const nR = Math.max(2, terrainNRows);
+  const stagger = 0.5;       // top row starts moving immediately; bottom row at scatter=0.5
+  const moveDur = 1.0-stagger;
+
   for(let mi=0;mi<meshes.length;mi++){
-    const {origin,target}=animData[mi];
+    const {origin,target,lineR}=animData[mi];
     const m=meshes[mi];
     for(let i=0;i<m.count;i++){
       const ox=origin[i*3],oy=origin[i*3+1],or_=origin[i*3+2];
       const tx=target[i*3],ty=target[i*3+1],tr=target[i*3+2];
-      dummy.position.set(ox+(tx-ox)*t, oy+(ty-oy)*t, 0);
-      dummy.rotation.set(0,0, or_+(tr-or_)*t);
+
+      // Stagger: row r begins its slide at scatter = (r/(nR-1))*stagger
+      const r=lineR[i];
+      const tStart=(r/(nR-1))*stagger;
+      const lineT=smoothstep(tStart, tStart+moveDur, t);
+
+      // Lateral slide: line approaches from beyond its final X position.
+      // sign(tx) determines which side. Factor eases to 0 as lineT→1.
+      const xSlide=(tx>=0?1:-1)*3.0*(1-lineT);
+
+      dummy.position.set(ox+(tx+xSlide-ox)*lineT, oy+(ty-oy)*lineT, 0);
+      dummy.rotation.set(0,0, or_+(tr-or_)*lineT);
       dummy.scale.setScalar(params.charSize);
       dummy.updateMatrix();
       m.setMatrixAt(i,dummy.matrix);
@@ -484,19 +506,25 @@ async function build(){
   // are all different chars from different ridge paths (#4 – mixed lines).
   globalInst.sort((a,b)=>a.ox-b.ox);
 
-  // Generate terrain using same xStep/yStep as fingerprint (#2)
+  // Generate terrain using same xStep as fingerprint (density parity)
   const xStep=params.charSize*params.spacing;
-  const terrainFlat=generateTerrainPositions(instCount, xStep, xStep);
+  const {pts:terrainFlat, lineIdx:terrainLineIdx, nRows:tRows}=
+    generateTerrainPositions(instCount, xStep, xStep);
+  terrainNRows=tRows;
 
-  // Build per-char terrain assignment arrays
+  // Build per-char terrain assignment (flat positions + row index)
   const terrainAssign={};
-  for(const ch of Object.keys(buckets))
-    terrainAssign[ch]=new Float32Array((buckets[ch].length/3)*3);
+  for(const ch of Object.keys(buckets)){
+    const cnt=buckets[ch].length/3;
+    terrainAssign[ch]={flat:new Float32Array(cnt*3), lineR:new Int32Array(cnt)};
+  }
   for(let gi=0;gi<globalInst.length;gi++){
     const {ch,i}=globalInst[gi];
-    terrainAssign[ch][i*3]  =terrainFlat[gi*3];
-    terrainAssign[ch][i*3+1]=terrainFlat[gi*3+1];
-    terrainAssign[ch][i*3+2]=terrainFlat[gi*3+2];
+    const ta=terrainAssign[ch];
+    ta.flat[i*3]  =terrainFlat[gi*3];
+    ta.flat[i*3+1]=terrainFlat[gi*3+1];
+    ta.flat[i*3+2]=terrainFlat[gi*3+2];
+    ta.lineR[i]   =terrainLineIdx[gi];
   }
 
   // Build InstancedMesh per character
@@ -506,7 +534,7 @@ async function build(){
     const mesh=new THREE.InstancedMesh(getGeom(ch),activeMat,cnt);
     mesh.castShadow=mesh.receiveShadow=true;
     const ta=terrainAssign[ch];
-    const ad={origin:new Float32Array(cnt*3), target:ta};
+    const ad={origin:new Float32Array(cnt*3), target:ta.flat, lineR:ta.lineR};
     for(let i=0;i<cnt;i++){
       let rot=pts[i*3+2]+Math.PI*0.5;
       rot=rot-Math.PI*Math.round(rot/Math.PI);
