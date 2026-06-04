@@ -376,23 +376,33 @@ function getGeom(ch){
 }
 
 // ─── Terrain position generator ───────────────────────────────────────────
-function generateTerrainPositions(n){
-  const W=5.2, H=4.8;
-  const nRows=Math.max(5,Math.round(Math.sqrt(n/20)));
-  const nCols=Math.ceil(n/nRows);
-  const xStep=W/nCols, yStep=H/(nRows+1);
-  const pts=[];
-  for(let r=0;r<nRows&&pts.length<n;r++){
-    const amp  =0.04+hash(r,0)*0.22;
-    const freq =1.0 +hash(r,1)*3.5;
-    const phase=hash(r,2)*Math.PI*2;
-    const baseY=H/2-(r+1)*yStep;
-    for(let c=0;c<nCols&&pts.length<n;c++){
-      const x=(-W/2)+c*xStep;
-      const y=baseY+amp*Math.sin(freq*x+phase);
-      const dy=amp*freq*Math.cos(freq*x+phase);
-      let rot=Math.atan2(dy,1);
-      rot=rot-Math.PI*Math.round(rot/Math.PI);
+// xStep/yStep match fingerprint spacing so character density is identical.
+// Lines are short (≤2.5 world-units), numerous, and spread to ±3.5 in X
+// so the scatter→fingerprint transition looks like lateral convergence.
+function generateTerrainPositions(n, xStep, yStep){
+  const maxLineW = 2.5;
+  const maxPerLine = Math.max(8, Math.floor(maxLineW / xStep));
+  const nRows = Math.ceil(n / maxPerLine);
+  // Vertical gap: fill ≈5 world-units, but never tighter than 1.5× charSize
+  const rowGap = Math.max(yStep * 1.5, 5.0 / (nRows + 1));
+  const pts = [];
+  for(let r=0; r<nRows && pts.length<n; r++){
+    // Variable line length: 50–100% of max (deterministic via hash)
+    const rowLen = Math.floor(maxPerLine * (0.5 + hash(r,3)*0.5));
+    const lineW  = rowLen * xStep;
+    // Horizontal drift so lines spread into ±3.5 range (wider than fingerprint)
+    const maxDrift = Math.max(0, 3.5 - lineW*0.5);
+    const xCenter  = (hash(r,4)*2-1)*maxDrift;
+    const baseY    = (nRows*0.5 - r - 0.5)*rowGap;
+    const amp   = 0.02 + hash(r,0)*0.12;
+    const freq  = 1.5  + hash(r,1)*4.0;
+    const phase = hash(r,2)*Math.PI*2;
+    for(let c=0; c<rowLen && pts.length<n; c++){
+      const x  = xCenter - lineW*0.5 + c*xStep;
+      const y  = baseY + amp*Math.sin(freq*x+phase);
+      const dy = amp*freq*Math.cos(freq*x+phase);
+      let rot  = Math.atan2(dy,1);
+      rot = rot-Math.PI*Math.round(rot/Math.PI);
       pts.push(x,y,rot);
     }
   }
@@ -425,9 +435,7 @@ function updateScatter(t){
 function disposeInstances(){
   for(const m of meshes){ fpGroup.remove(m); }
   meshes=[]; instCount=0; animData=[];
-  scatterCurrent=0;
-  params.scatter=0;
-  if(scatterCtrl) scatterCtrl.setValue(0);
+  // Intentionally preserve scatterCurrent/params.scatter across rebuilds (#2)
 }
 
 async function build(){
@@ -460,28 +468,49 @@ async function build(){
     }
   }
 
-  // Pre-generate terrain target positions (one per global instance, in bucket order)
-  const terrainFlat=generateTerrainPositions(instCount);
+  // ── Spatial assignment for convergence + character mixing ────────────────
+  // Collect every instance with its fingerprint position and char bucket index.
+  const globalInst=[];
+  for(const [ch,pts] of Object.entries(buckets)){
+    for(let i=0;i<pts.length/3;i++){
+      let rot=pts[i*3+2]+Math.PI*0.5;
+      rot=rot-Math.PI*Math.round(rot/Math.PI);
+      globalInst.push({ch, i, ox:pts[i*3], oy:pts[i*3+1], orot:rot});
+    }
+  }
+  // Sort by fingerprint X → terrain positions also go left-to-right
+  // so scatter transition looks like lateral convergence (#3).
+  // Adjacent terrain slots now belong to characters at the same X, which
+  // are all different chars from different ridge paths (#4 – mixed lines).
+  globalInst.sort((a,b)=>a.ox-b.ox);
 
+  // Generate terrain using same xStep/yStep as fingerprint (#2)
+  const xStep=params.charSize*params.spacing;
+  const terrainFlat=generateTerrainPositions(instCount, xStep, xStep);
+
+  // Build per-char terrain assignment arrays
+  const terrainAssign={};
+  for(const ch of Object.keys(buckets))
+    terrainAssign[ch]=new Float32Array((buckets[ch].length/3)*3);
+  for(let gi=0;gi<globalInst.length;gi++){
+    const {ch,i}=globalInst[gi];
+    terrainAssign[ch][i*3]  =terrainFlat[gi*3];
+    terrainAssign[ch][i*3+1]=terrainFlat[gi*3+1];
+    terrainAssign[ch][i*3+2]=terrainFlat[gi*3+2];
+  }
+
+  // Build InstancedMesh per character
   const dummy=new THREE.Object3D();
-  let gi=0;
   for(const [ch,pts] of Object.entries(buckets)){
     const cnt=pts.length/3;
     const mesh=new THREE.InstancedMesh(getGeom(ch),activeMat,cnt);
     mesh.castShadow=mesh.receiveShadow=true;
-
-    const ad={origin:new Float32Array(cnt*3), target:new Float32Array(cnt*3)};
-
+    const ta=terrainAssign[ch];
+    const ad={origin:new Float32Array(cnt*3), target:ta};
     for(let i=0;i<cnt;i++){
       let rot=pts[i*3+2]+Math.PI*0.5;
       rot=rot-Math.PI*Math.round(rot/Math.PI);
-
-      // Store origin (fingerprint)
       ad.origin[i*3]=pts[i*3]; ad.origin[i*3+1]=pts[i*3+1]; ad.origin[i*3+2]=rot;
-      // Store target (terrain)
-      ad.target[i*3]=terrainFlat[gi*3]; ad.target[i*3+1]=terrainFlat[gi*3+1]; ad.target[i*3+2]=terrainFlat[gi*3+2];
-      gi++;
-
       dummy.position.set(pts[i*3],pts[i*3+1],0);
       dummy.rotation.set(0,0,rot);
       dummy.scale.setScalar(params.charSize);
@@ -492,6 +521,9 @@ async function build(){
     animData.push(ad);
     fpGroup.add(mesh); meshes.push(mesh);
   }
+
+  // Apply current scatter immediately so a rebuild doesn't snap to 0 (#2)
+  if(scatterCurrent>0.001) updateScatter(scatterCurrent);
 
   document.getElementById('building').style.display='none';
   isBuilding=false;
