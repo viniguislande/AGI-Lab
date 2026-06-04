@@ -393,9 +393,12 @@ function generateTerrainPositions(n, xStep, yStep){
     const remaining=n-pts.length/3;
     const rowLen=Math.min(remaining, Math.floor(maxPerLine*(0.5+hash(r,3)*0.5)));
     const lineW=rowLen*xStep;
-    // Always place lines away from centre: |xCenter| ≥ 1.5
+    // Density gradient: ~20% of lines near centre (0.1–1.0), ~80% on sides (1.0–3.5)
+    // Creates "almost empty" centre rather than fully void.
     const xSign=hash(r,5)>0.5?1:-1;
-    const xCenter=xSign*(1.5+hash(r,4)*2.0);
+    const xCenter=hash(r,9)<0.20
+      ? xSign*(0.1+hash(r,4)*0.9)
+      : xSign*(1.0+hash(r,4)*2.5);
     const baseY=(nRows*0.5-r-0.5)*rowGap;
     // Two-harmonic wave for more organic twist
     const a1=0.03+hash(r,0)*0.15, f1=2.0+hash(r,1)*5.0, ph1=hash(r,2)*Math.PI*2;
@@ -417,47 +420,38 @@ function generateTerrainPositions(n, xStep, yStep){
 function smoothstep(lo,hi,x){ const t=Math.max(0,Math.min(1,(x-lo)/(hi-lo))); return t*t*(3-2*t); }
 
 // ─── Scatter update ────────────────────────────────────────────────────────
-// Two-phase per-line animation, staggered top-to-bottom:
-//  Phase 1 – characters quickly move to their pre-slide position
-//            (terrain pos shifted toward centre by slideAmt).
-//  Phase 2 – the entire row slides rigidly outward to its final position.
-// Because phase 2 adds the SAME delta-X to every character in a row,
-// the row moves as a clean rigid unit — no individual letter chaos.
+// Stagger unit = fingerprint ridge (SVG path index, 0-21).
+// All characters in the same ridge share the same lineT → the ridge moves
+// as a rigid unit, giving the "unrolling" feel instead of individual chaos.
+// A gentle lateral component (same dir for all chars in the ridge) adds
+// the outward slide sensation without a separate phase.
 function updateScatter(t){
   if(!animData.length) return;
   const dummy=new THREE.Object3D();
-  const nR     =Math.max(2,terrainNRows);
-  const stagger=0.45;           // last row starts at scatter=0.45
-  const moveDur=1.0-stagger;
-  const slideAmt=2.8;           // world-units the line travels during phase 2
+  const nRidges=SVG_PATHS.length;           // 22 fingerprint ridges
+  const stagger =0.50;                      // ridge 0 moves first; ridge 21 starts at scatter=0.5
+  const moveDur =1.0-stagger;
+  const slideAmt=1.4;                       // gentle outward slide per ridge
 
   for(let mi=0;mi<meshes.length;mi++){
-    const {origin,target,lineR,lineDir}=animData[mi];
+    const {origin,target,lineDir,ridgeR}=animData[mi];
     const m=meshes[mi];
     for(let i=0;i<m.count;i++){
       const ox=origin[i*3],oy=origin[i*3+1],or_=origin[i*3+2];
       const tx=target[i*3],ty=target[i*3+1],tr=target[i*3+2];
-      const r  =lineR[i];
-      const dir=lineDir[i];     // +1 = line is on the right, -1 = left
 
-      const tStart=(r/(nR-1))*stagger;
-      // Phase 1: fingerprint → pre-slide pos  (first 35% of moveDur)
-      const p1=smoothstep(tStart, tStart+moveDur*0.35, t);
-      // Phase 2: rigid outward slide           (last 75% of moveDur, overlaps p1)
-      const p2=smoothstep(tStart+moveDur*0.25, tStart+moveDur, t);
+      // Per-ridge timing: all chars in the same SVG path animate together
+      const ri =ridgeR[i];
+      const tStart=(ri/(nRidges-1))*stagger;
+      const lineT=smoothstep(tStart, tStart+moveDur, t);
 
-      // Pre-slide position: terrain pos shifted toward centre
-      const xPre=tx-dir*slideAmt;
+      // Shared outward slide: same direction for every char in this ridge
+      // → the whole ridge slides sideways as one piece, no individual chaos
+      const dir=lineDir[i];
+      const slide=dir*slideAmt*(1-lineT);
 
-      // Phase 1 moves each char to its individual pre-slide pos
-      const pxMid=ox+(xPre-ox)*p1;
-      const pyMid=oy+(ty -oy)*p1;
-      // Phase 2 adds a shared rigid outward translation (same for whole row)
-      const px=pxMid+dir*slideAmt*p2;
-      const py=pyMid;
-
-      dummy.position.set(px,py,0);
-      dummy.rotation.set(0,0, or_+(tr-or_)*Math.max(p1,p2));
+      dummy.position.set(ox+(tx+slide-ox)*lineT, oy+(ty-oy)*lineT, 0);
+      dummy.rotation.set(0,0, or_+(tr-or_)*lineT);
       dummy.scale.setScalar(params.charSize);
       dummy.updateMatrix();
       m.setMatrixAt(i,dummy.matrix);
@@ -486,11 +480,17 @@ async function build(){
   const seq=params.textContent.split('').filter(c=>/\S/.test(c));
   if(!seq.length){ document.getElementById('building').style.display='none'; isBuilding=false; return; }
 
-  const flat=[];
-  for(const d of SVG_PATHS){ const p=samplePath(d,stepSvg); for(const v of p) flat.push(v); }
+  // Track which SVG ridge each sampled point belongs to
+  const flat=[], ridgeFlat=[];
+  for(let ri=0;ri<SVG_PATHS.length;ri++){
+    const p=samplePath(SVG_PATHS[ri],stepSvg);
+    for(const v of p) flat.push(v);
+    for(let j=0;j<p.length/3;j++) ridgeFlat.push(ri);
+  }
 
   const nLayers=Math.max(1,Math.round(params.layers));
-  const nPts=flat.length/3, seqLen=seq.length, buckets={};
+  const nPts=flat.length/3, seqLen=seq.length;
+  const buckets={}, bucketRidge={};
   for(let i=0;i<nPts;i++){
     const ang=flat[i*3+2];
     const perpX=-Math.sin(ang), perpY=Math.cos(ang);
@@ -499,27 +499,27 @@ async function build(){
       const offset=(L-(nLayers-1)*0.5)*layerSpacing;
       const wx=flat[i*3]+perpX*offset, wy=flat[i*3+1]+perpY*offset;
       const c=seq[(i*nLayers+L)%seqLen];
-      if(!buckets[c]) buckets[c]=[];
+      if(!buckets[c]){ buckets[c]=[]; bucketRidge[c]=[]; }
       buckets[c].push(wx,wy,ang);
+      bucketRidge[c].push(ridgeFlat[i]);
       instCount++;
     }
   }
 
-  // ── Spatial assignment for convergence + character mixing ────────────────
-  // Collect every instance with its fingerprint position and char bucket index.
+  // ── Collect instances, sort by fingerprint ridge ─────────────────────────
+  // Sorting by ridge keeps all chars from the same SVG path together.
+  // In updateScatter every char in the same ridge shares the same lineT
+  // → the curved ridge moves as a rigid unit ("unrolling" feel).
   const globalInst=[];
   for(const [ch,pts] of Object.entries(buckets)){
     for(let i=0;i<pts.length/3;i++){
       let rot=pts[i*3+2]+Math.PI*0.5;
       rot=rot-Math.PI*Math.round(rot/Math.PI);
-      globalInst.push({ch, i, ox:pts[i*3], oy:pts[i*3+1], orot:rot});
+      globalInst.push({ch, i, ox:pts[i*3], oy:pts[i*3+1], ridgeIdx:bucketRidge[ch][i]});
     }
   }
-  // Sort by fingerprint X → terrain positions also go left-to-right
-  // so scatter transition looks like lateral convergence (#3).
-  // Adjacent terrain slots now belong to characters at the same X, which
-  // are all different chars from different ridge paths (#4 – mixed lines).
-  globalInst.sort((a,b)=>a.ox-b.ox);
+  // Primary sort: ridge index.  Secondary: X position within ridge.
+  globalInst.sort((a,b)=>a.ridgeIdx!==b.ridgeIdx?a.ridgeIdx-b.ridgeIdx:a.ox-b.ox);
 
   // Generate terrain using same xStep as fingerprint (density parity)
   const xStep=params.charSize*params.spacing;
@@ -527,20 +527,24 @@ async function build(){
     generateTerrainPositions(instCount, xStep, xStep);
   terrainNRows=tRows;
 
-  // Build per-char terrain assignment (flat positions + row index + slide dir)
+  // Build per-char terrain assignment
   const terrainAssign={};
   for(const ch of Object.keys(buckets)){
     const cnt=buckets[ch].length/3;
-    terrainAssign[ch]={flat:new Float32Array(cnt*3), lineR:new Int32Array(cnt), lineDir:new Int8Array(cnt)};
+    terrainAssign[ch]={
+      flat:   new Float32Array(cnt*3),
+      lineDir:new Int8Array(cnt),
+      ridgeR: new Uint8Array(cnt),
+    };
   }
   for(let gi=0;gi<globalInst.length;gi++){
-    const {ch,i}=globalInst[gi];
+    const {ch,i,ridgeIdx}=globalInst[gi];
     const ta=terrainAssign[ch];
     ta.flat[i*3]  =terrainFlat[gi*3];
     ta.flat[i*3+1]=terrainFlat[gi*3+1];
     ta.flat[i*3+2]=terrainFlat[gi*3+2];
-    ta.lineR[i]   =terrainLineIdx[gi];
     ta.lineDir[i] =terrainLineDir[gi];
+    ta.ridgeR[i]  =ridgeIdx;
   }
 
   // Build InstancedMesh per character
@@ -550,7 +554,7 @@ async function build(){
     const mesh=new THREE.InstancedMesh(getGeom(ch),activeMat,cnt);
     mesh.castShadow=mesh.receiveShadow=true;
     const ta=terrainAssign[ch];
-    const ad={origin:new Float32Array(cnt*3), target:ta.flat, lineR:ta.lineR, lineDir:ta.lineDir};
+    const ad={origin:new Float32Array(cnt*3), target:ta.flat, lineDir:ta.lineDir, ridgeR:ta.ridgeR};
     for(let i=0;i<cnt;i++){
       let rot=pts[i*3+2]+Math.PI*0.5;
       rot=rot-Math.PI*Math.round(rot/Math.PI);
